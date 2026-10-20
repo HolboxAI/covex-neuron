@@ -42,9 +42,19 @@ cn.compare(gpu, trn)
 
 You pay per second while the job runs, and nothing keeps running afterwards.
 
+## Notebooks
+
+| Notebook | Workload |
+|---|---|
+| [01 Sentiment analysis](https://github.com/HolboxAI/covex-neuron/blob/main/notebooks/01_sentiment_analysis.ipynb) | transformers pipeline, DistilBERT SST-2 |
+| [02 Text classification](https://github.com/HolboxAI/covex-neuron/blob/main/notebooks/02_text_classification.ipynb) | AutoModelForSequenceClassification, emotion (7 classes) |
+| [03 Image generation](https://github.com/HolboxAI/covex-neuron/blob/main/notebooks/03_image_generation.ipynb) | diffusers, SD-Turbo |
+
+Each one runs the same script on a GPU and on Trainium and prints the comparison.
+
 ## Examples
 
-[`examples/nvidia`](examples/nvidia) has sentiment analysis, text classification and image generation scripts as written for a GPU. [`examples/trainium`](examples/trainium) has the same scripts with the two lines added. To run both and compare:
+[`examples/nvidia`](https://github.com/HolboxAI/covex-neuron/blob/main/examples/nvidia) has sentiment analysis, text classification and image generation scripts as written for a GPU. [`examples/trainium`](https://github.com/HolboxAI/covex-neuron/blob/main/examples/trainium) has the same scripts with the two lines added. To run both and compare:
 
 ```bash
 python examples/run_demo.py
@@ -52,4 +62,4 @@ python examples/run_demo.py
 
 ## License
 
-[Apache 2.0](LICENSE)
+[Apache 2.0](https://github.com/HolboxAI/covex-neuron/blob/main/LICENSE)
