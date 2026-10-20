@@ -118,8 +118,13 @@ class _Aws:
         except ClientError:
             kwargs = {} if self.region == "us-east-1" else {
                 "CreateBucketConfiguration": {"LocationConstraint": self.region}}
-            self.s3.create_bucket(Bucket=self.bucket, **kwargs)
-            print(f"created s3://{self.bucket}")
+            try:
+                self.s3.create_bucket(Bucket=self.bucket, **kwargs)
+                print(f"created s3://{self.bucket}")
+            except ClientError as e:  # another run created it at the same moment
+                if e.response["Error"]["Code"] not in ("BucketAlreadyOwnedByYou", "OperationAborted"):
+                    raise
+            self.s3.get_waiter("bucket_exists").wait(Bucket=self.bucket)
 
     def _ensure_role(self):
         try:
@@ -246,11 +251,13 @@ def _run_training_job(aws, job, prefix, names, args, model_s3, reqs, max_minutes
         inputs.append(channel("model", model_s3))
     command = _job_command("/opt/ml/input/data/code", "/opt/ml/model",
                            "/opt/ml/input/data/model" if model_s3 else None, names, args, reqs)
+    # ContainerArguments are capped at 256 chars, so ship the command as a file in the code channel.
+    aws.s3.put_object(Bucket=aws.bucket, Key=f"{prefix}/code/run.sh", Body=command.encode())
     aws.sm.create_training_job(
         TrainingJobName=job,
         RoleArn=aws.role_arn,
         AlgorithmSpecification={"TrainingImage": GPU_IMAGE.format(region=aws.region), "TrainingInputMode": "File",
-                                "ContainerEntrypoint": ["bash", "-c"], "ContainerArguments": [command]},
+                                "ContainerEntrypoint": ["bash", "/opt/ml/input/data/code/run.sh"]},
         InputDataConfig=inputs,
         OutputDataConfig={"S3OutputPath": f"s3://{aws.bucket}/{prefix}/output"},
         ResourceConfig={"InstanceType": GPU_INSTANCE, "InstanceCount": 1, "VolumeSizeInGB": 100},
