@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "covex-neuron"
-version = "0.0.1.dev3"
+version = "0.0.1.dev4"
 description = "Run your existing PyTorch / Hugging Face code on AWS Trainium, side by side with NVIDIA GPUs."
 readme = "README.md"
 requires-python = ">=3.9"

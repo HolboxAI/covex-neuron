@@ -45,7 +45,9 @@ SPOT_TARGETS = {
         "venv_check": "import torch; assert torch.cuda.is_available()",
     },
     "trainium": {
-        "instance_types": ["trn2.3xlarge"],
+        # 1 chip first; the 16-chip size often has far better Spot capacity (e.g. ap-south-2) and Spot
+        # pricing (~87% off), and the script still uses one chip.
+        "instance_types": ["trn2.3xlarge", "trn2.48xlarge"],
         # TorchNeuron (torch-neuronx 2.14, Neuron SDK 2.33) preinstalled.
         "ami": "Deep Learning AMI Neuron torch-neuronx 2.14.0 (Ubuntu 24.04) SDK *",
         "venv_check": "import torch_neuronx",
