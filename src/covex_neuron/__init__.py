@@ -12,7 +12,7 @@ From your laptop or notebook (pay per second, nothing left running):
     cn.run(["sentiment.py"], on="trainium")
 """
 
-__version__ = "0.0.1.dev2"
+__version__ = "0.0.1.dev3"
 
 
 def __getattr__(name):

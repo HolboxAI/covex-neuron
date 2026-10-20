@@ -43,12 +43,12 @@ pipe = cn.prepare(pipe)                   # no-op on GPU / CPU
 Run it on a GPU and on Trainium from your laptop, using only your AWS credentials:
 
 ```python
-gpu = cn.run(["sentiment.py"], on="gpu")        # 1x NVIDIA A10G
-trn = cn.run(["sentiment.py"], on="trainium")   # 1x Trainium2 chip
+gpu = cn.run(["sentiment.py"], on="gpu")        # 1x NVIDIA GPU, g5.xlarge Spot
+trn = cn.run(["sentiment.py"], on="trainium")   # 1x Trainium2 chip, trn2.3xlarge Spot
 cn.compare(gpu, trn)
 ```
 
-You pay per second while the job runs, and nothing keeps running afterwards.
+Both run as EC2 Spot instances in sa-east-1 on AWS's Deep Learning AMIs, are billed per second, and terminate themselves when the script finishes. Your account needs EC2 Spot quota there for G instances and Trn instances.
 
 ## Notebooks
 
