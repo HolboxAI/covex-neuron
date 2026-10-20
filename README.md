@@ -1,6 +1,8 @@
 <h1 align="center">covex-neuron</h1>
 
 <p align="center">
+    <a href="https://pypi.org/project/covex-neuron/"><img alt="PyPI" src="https://img.shields.io/pypi/v/covex-neuron?include_prereleases&label=pypi"></a>
+    <a href="https://github.com/HolboxAI/covex-neuron"><img alt="GitHub" src="https://img.shields.io/badge/github-HolboxAI%2Fcovex--neuron-black?logo=github"></a>
     <a href="https://github.com/HolboxAI/covex-neuron/blob/main/LICENSE"><img alt="License" src="https://img.shields.io/github/license/HolboxAI/covex-neuron.svg?color=blue"></a>
     <img alt="Python" src="https://img.shields.io/badge/python-3.9%2B-blue">
     <img alt="Status" src="https://img.shields.io/badge/status-pre--alpha-orange">
@@ -9,6 +11,12 @@
 <h3 align="center">
     <p>Run your PyTorch and Hugging Face code on AWS Trainium, unchanged from NVIDIA except for two lines</p>
 </h3>
+
+<p align="center">
+    <a href="https://github.com/HolboxAI/covex-neuron">GitHub</a> ·
+    <a href="https://pypi.org/project/covex-neuron/">PyPI</a> ·
+    <a href="https://github.com/HolboxAI/covex-neuron/tree/main/notebooks">Notebooks</a>
+</p>
 
 covex-neuron is built on [TorchNeuron](https://pytorch.org/blog/introducing-torchneuron-native-pytorch-backend-for-aws-trainium/), the native PyTorch backend for Trainium2 and Trainium3. It handles the parts that make Trainium different from a GPU (bf16, fixed input shapes, the Neuron compiler) and runs your script on AWS by the second, next to an NVIDIA GPU for comparison.
 
