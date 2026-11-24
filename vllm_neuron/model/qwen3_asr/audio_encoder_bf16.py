@@ -31,7 +31,8 @@ import torch.nn.functional as F
 import numpy as np
 
 import vllm_neuron.functional as NF
-from nkilib.core.utils.common_types import NormType
+from nkilib.core.utils.common_types import ActFnType, NormType
+from vllm_neuron import envs
 from vllm_neuron.parallel.neuron_parallel_state import (
     get_neuron_encoder_tp_group,
     shard_select,
@@ -46,6 +47,13 @@ from .weight_loader import (
     audio_qkv_bias_loader,
     audio_qkv_weight_loader,
 )
+
+# Route the audio MLP (up -> GELU -> down) through the shared nkilib MLP kernel
+# with ``skip_gate=True`` instead of raw aten matmuls. Gated by
+# ``VLLM_NEURON_ASR_AUDIO_MLP_NKI`` (off by default) because the nkilib
+# skip_gate/GELU kernel path is not yet exercised by a shipping model; keep the
+# raw-matmul fallback until it is hardware-validated for accuracy and latency.
+_AUDIO_MLP_NKI = envs.VLLM_NEURON_ASR_AUDIO_MLP_NKI
 
 
 @allow_in_graph_cacheable
@@ -191,10 +199,33 @@ class Qwen3ASRAudioMLP(nn.Module):
             ``[..., d_model]`` — same leading dims as input.
         """
 
-        up = (
-            hidden_states @ self.up_proj_weight + self.up_proj_bias
-        )  # column-parallel [T, I/tp]
-        output = gelu(up) @ self.down_proj_weight  # row-parallel partials [T, H]
+        if _AUDIO_MLP_NKI:
+            # The nkilib MLP kernel takes a 2D [T, H] activation; the audio
+            # encoder carries [num_blocks, block_size, d_model]. Flatten the
+            # leading block dims for the kernel and restore them after. With
+            # ``skip_gate=True`` the kernel runs ``up -> GELU -> down`` and folds
+            # in the per-rank (sharded) up bias. The replicated down bias stays
+            # outside: it is added after the all-reduce below, exactly as on the
+            # raw-matmul path.
+            out_shape = hidden_states.shape
+            output = NF.mlp(
+                hidden_states.reshape(-1, self.d_model),
+                # gate_w is unused when skip_gate=True; pass up_w so the kernel
+                # eligibility gate reads the correct intermediate dim.
+                self.up_proj_weight,
+                self.up_proj_weight,
+                self.down_proj_weight,
+                skip_gate=True,
+                act_fn=ActFnType.GELU,
+                up_b=self.up_proj_bias.unsqueeze(0),
+                norm_type=NormType.NO_NORM,
+            )
+            output = output.reshape(out_shape)
+        else:
+            up = (
+                hidden_states @ self.up_proj_weight + self.up_proj_bias
+            )  # column-parallel [T, I/tp]
+            output = gelu(up) @ self.down_proj_weight  # row-parallel partials [T, H]
 
         # >>> PARALLELISM: row-parallel down_proj -> reduce partial sums <<<
         # Required whenever the intermediate dim is sharded (world_size > 1).
