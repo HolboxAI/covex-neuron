@@ -28,6 +28,7 @@ from .gpt_oss_mega_decode import (
     gpt_oss_mega_decode,
 )
 from .mlp import mlp
+from .qwen3_intree_mlp_bf16 import qwen3_intree_mlp_bf16
 from .moe.build_all2all_combine_metadata import build_all2all_combine_metadata
 from .moe.build_all2all_dispatch_metadata import build_all2all_dispatch_metadata
 from .moe.build_all_gatherv_metadata import build_all_gatherv_metadata

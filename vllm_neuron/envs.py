@@ -75,6 +75,9 @@ if TYPE_CHECKING:
     VLLM_NEURON_MEGA_FUSE_EMBED_HIDDEN: bool = False
     VLLM_NEURON_MEGA_FUSE_ROPE: bool = False
     VLLM_NEURON_QWEN3_INTREE_MLP: bool = True
+    # In-tree Qwen3-32B BF16 decode MLP kernel. OFF by default: first draft,
+    # needs hardware validation before it can default on.
+    VLLM_NEURON_QWEN3_INTREE_MLP_BF16: bool = False
     # LNC1 a2a-fused sequence-parallel decode boundaries. ON by default; set "0"
     # to disable sequence-parallel decode entirely (kill switch): the a2a
     # composers are the only sequence-parallel decode path, so a refused shape
@@ -434,6 +437,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # True unless the value is explicitly false.
     "VLLM_NEURON_QWEN3_INTREE_MLP": lambda: (
         maybe_convert_bool(os.getenv("VLLM_NEURON_QWEN3_INTREE_MLP")) is not False
+    ),
+    "VLLM_NEURON_QWEN3_INTREE_MLP_BF16": lambda: (
+        maybe_convert_bool(os.getenv("VLLM_NEURON_QWEN3_INTREE_MLP_BF16")) or False
     ),
     "VLLM_NEURON_QWEN3_SP_A2A": lambda: (
         maybe_convert_bool(os.getenv("VLLM_NEURON_QWEN3_SP_A2A")) is not False
