@@ -996,6 +996,7 @@ class NeuronModelRunner(KVConnectorModelRunnerMixin, NeuronECConnectorModelRunne
                 use_configured_buckets=user_set_num_batched_tokens_buckets,
                 auto_buckets=auto_num_batched_tokens_buckets,
                 dcp_stride=dcp_stride,
+                default_step=neuron_config_dict.get("num_batched_tokens_bucket_step"),
             )
         )
 
@@ -1022,7 +1023,8 @@ class NeuronModelRunner(KVConnectorModelRunnerMixin, NeuronECConnectorModelRunne
             )
         else:
             self.neuron_config.num_seqs_buckets = get_default_num_seqs_buckets(
-                self.max_num_reqs
+                self.max_num_reqs,
+                step=neuron_config_dict.get("num_seqs_bucket_step"),
             )
             logger.info(
                 "Using default num_seqs_buckets: %s",

@@ -265,6 +265,7 @@ class NeuronScheduler(Scheduler):
             use_configured_buckets=user_set_num_batched_tokens_buckets,
             auto_buckets=auto_num_batched_tokens_buckets,
             dcp_stride=dcp_stride,
+            default_step=neuron_config.get("num_batched_tokens_bucket_step"),
         )
 
         if user_set_num_batched_tokens_buckets:
@@ -288,7 +289,10 @@ class NeuronScheduler(Scheduler):
                 self.max_num_seqs,
             )
         else:
-            self.num_seqs_buckets = get_default_num_seqs_buckets(self.max_num_seqs)
+            self.num_seqs_buckets = get_default_num_seqs_buckets(
+                self.max_num_seqs,
+                step=neuron_config.get("num_seqs_bucket_step"),
+            )
 
         # Pre-initialize metric labels so they appear at /metrics immediately
         for bucket_size in self.num_batched_tokens_buckets:
