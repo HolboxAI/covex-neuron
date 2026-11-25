@@ -328,7 +328,26 @@ class NeuronScheduler(Scheduler):
             max_concurrent if max_concurrent > 0 else self.max_num_seqs
         )
 
-        if 0 < max_concurrent < self.max_num_seqs:
+        # Optional KV-cache overcommit: trust upstream's block allocator and
+        # recompute preemption instead of the worst-case concurrency cap. The
+        # conservative default guarantees no decode-decode preemption; enabling
+        # overcommit lets short-output workloads use the full KV cache, at the
+        # cost of possibly preempting (recomputing) a running request when the
+        # cache fills. Recompute preemption on Neuron is experimental and not
+        # yet validated end-to-end on-device.
+        self.kv_cache_overcommit = bool(
+            neuron_config.get("kv_cache_overcommit", False)
+        )
+        if self.kv_cache_overcommit:
+            self._max_kv_concurrent = self.max_num_seqs
+            logger.warning(
+                "kv_cache_overcommit=True: KV admission trusts upstream block "
+                "allocation + recompute preemption. This is experimental and "
+                "not yet validated on-device; a preempted request is recomputed "
+                "from scratch."
+            )
+
+        if not self.kv_cache_overcommit and 0 < max_concurrent < self.max_num_seqs:
             logger.warning(
                 "max_num_seqs (%d) exceeds worst-case KV cache capacity (%d "
                 "concurrent requests at max_model_len=%d, assuming no prefix "
@@ -829,7 +848,10 @@ class NeuronScheduler(Scheduler):
         # Prevent livelock: don't admit a new prefill if running requests
         # already saturate KV cache capacity at worst-case (max_model_len).
         # This is conservative — it doesn't account for prefix cache sharing
-        # — but guarantees no decode-decode preemption.
+        # — but guarantees no decode-decode preemption. When
+        # kv_cache_overcommit is enabled, _max_kv_concurrent equals
+        # max_num_seqs, so this gate is effectively "at capacity" and upstream
+        # recompute preemption is what frees blocks instead.
         if self._kv_in_use() >= self._max_kv_concurrent:
             if not self._kv_exhaustion_warned:
                 logger.warning(
