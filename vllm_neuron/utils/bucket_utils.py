@@ -33,21 +33,48 @@ SUPPORTED_KV_SEGMENT_SIZES = {512, 1024, 2048, 4096, 8192}
 # =============================================================================
 
 
-def get_default_num_batched_tokens_buckets(max_num_batched_tokens: int) -> list[int]:
-    """Generate default prefill token buckets (powers of 2 starting from 128).
+def get_default_num_batched_tokens_buckets(
+    max_num_batched_tokens: int, step: int | None = None
+) -> list[int]:
+    """Generate default prefill token buckets.
+
+    When ``step`` is None, buckets are powers of 2 starting from 128. When
+    ``step`` is a positive multiple of 128, buckets are a linear progression
+    ``step, 2*step, 3*step, ...`` up to ``max_num_batched_tokens``. Finer steps
+    cut prefill padding waste at the cost of more compiled NEFFs.
 
     Args:
         max_num_batched_tokens: Maximum number of batched tokens (must be last bucket).
+        step: Optional linear step (a positive multiple of 128). None = powers of 2.
 
     Returns:
-        List of power-of-2 bucket sizes ending with max_num_batched_tokens.
+        List of bucket sizes ending with max_num_batched_tokens.
         e.g., [128, 256, 512, 1024, 2048] for max_num_batched_tokens=2048
     """
+    if step is None:
+        buckets = []
+        bucket = 128
+        while bucket < max_num_batched_tokens:
+            buckets.append(bucket)
+            bucket *= 2
+
+        # Always add max_num_batched_tokens as the last bucket
+        buckets.append(max_num_batched_tokens)
+        return buckets
+
+    if step <= 0:
+        raise ValueError(f"step must be positive, got {step}")
+    if step % 128 != 0:
+        raise ValueError(
+            f"num_batched_tokens_bucket_step={step} must be a multiple of 128 "
+            "(the NKI attention kernel tiles Q over 128 partitions)"
+        )
+
     buckets = []
-    bucket = 128
+    bucket = step
     while bucket < max_num_batched_tokens:
         buckets.append(bucket)
-        bucket *= 2
+        bucket += step
 
     # Always add max_num_batched_tokens as the last bucket
     buckets.append(max_num_batched_tokens)
@@ -105,21 +132,43 @@ def get_default_kv_segment_size_buckets(
     return [max_num_batched_tokens]
 
 
-def get_default_num_seqs_buckets(max_num_seqs: int) -> list[int]:
-    """Generate default decode batch size buckets (powers of 2 starting from 1).
+def get_default_num_seqs_buckets(
+    max_num_seqs: int, step: int | None = None
+) -> list[int]:
+    """Generate default decode batch size buckets.
+
+    When ``step`` is None, buckets are powers of 2 starting from 1. When
+    ``step`` is a positive integer, buckets are a linear progression
+    ``step, 2*step, 3*step, ...`` up to ``max_num_seqs``. Finer steps cut
+    decode padding waste at the cost of more compiled NEFFs.
 
     Args:
         max_num_seqs: Maximum number of sequences (must be last bucket).
+        step: Optional linear step (a positive integer). None = powers of 2.
 
     Returns:
-        List of power-of-2 bucket sizes ending with max_num_seqs.
+        List of bucket sizes ending with max_num_seqs.
         e.g., [1, 2, 4, 8] for max_num_seqs=8
     """
+    if step is None:
+        buckets = []
+        size = 1
+        while size < max_num_seqs:
+            buckets.append(size)
+            size *= 2
+
+        # Always add max_num_seqs as the last bucket
+        buckets.append(max_num_seqs)
+        return buckets
+
+    if step <= 0:
+        raise ValueError(f"step must be positive, got {step}")
+
     buckets = []
-    size = 1
+    size = step
     while size < max_num_seqs:
         buckets.append(size)
-        size *= 2
+        size += step
 
     # Always add max_num_seqs as the last bucket
     buckets.append(max_num_seqs)
@@ -297,6 +346,7 @@ def resolve_num_batched_tokens_buckets(
     use_configured_buckets: bool = False,
     auto_buckets: list[int] | None = None,
     dcp_stride: int = 1,
+    default_step: int | None = None,
 ) -> list[int]:
     """Resolve and DCP-align the prefill token buckets in one place.
 
@@ -326,7 +376,9 @@ def resolve_num_batched_tokens_buckets(
     elif auto_buckets is not None:
         buckets = auto_buckets
     else:
-        buckets = get_default_num_batched_tokens_buckets(max_num_batched_tokens)
+        buckets = get_default_num_batched_tokens_buckets(
+            max_num_batched_tokens, step=default_step
+        )
 
     return align_prefill_buckets_for_dcp(buckets, dcp_stride)
 
