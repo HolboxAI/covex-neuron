@@ -27,8 +27,8 @@ No new kernel code is built until round 1 is in.
 - Llama 3.1 8B TP4 falls back to torch attention in stock (#76/#77), so a Llama win would be a bug fix, not an engine gain. Llama is round 2, after porting #77, with the fix applied to both arms.
 
 **One chip per arm:** each arm runs on its own chip of the same instance (`NEURON_RT_VISIBLE_CORES`).
-- All arms compile in parallel.
-- Arms are benchmarked one at a time, in alternating order, so the host CPU is never shared during a measurement.
+- All six arms compile **and benchmark at the same time**. Each server and client uses a few of the 192 host vCPUs.
+- Arms start in a different order on each repeat. If any arm's c=1 TPOT moves more than 3% between repeats, re-run that point alone.
 
 ## Arms
 
@@ -47,7 +47,9 @@ S0 is reported for reference: "vs stock defaults".
 
 ## Workloads
 
-`vllm bench serve --dataset-name random --ignore-eos`, 3 repeats per point, median reported.
+`vllm bench serve --dataset-name random --ignore-eos`.
+- Concurrency ≥ 8: 3 repeats per point, median reported.
+- Concurrency 1: run once. It goes through the same code path in every arm, so it's only a regression check.
 
 | Workload | Input / output | Concurrency | Prompts per point |
 |---|---|---|---|
@@ -84,14 +86,27 @@ On S1 at W3, concurrency 16:
 
 ## Budget and safety
 
-- **Spot price:** $8.60/h on 2026-11-26.
-- **Hard stop:** the instance self-terminates after 16 h (`shutdown -h +960` with terminate-on-shutdown).
-- **Expected spend:** about $100–140. **Cap: $150.**
+**Time on the instance** (all arms in parallel):
+
+| Step | Estimate |
+|---|---|
+| Boot, image pull (~15 GB), model download (16 GB) | 20 min |
+| Compile, 6 arms in parallel | 45–60 min |
+| Benchmark matrix, about 25 min per repeat, 3 repeats (c=1 once) | 70–80 min |
+| GSM8K, 2 arms × 1,319 questions | 10 min |
+| neuron-profile of one decode step | 20 min |
+| Slack | 30 min |
+| **Total** | **about 3.5–4 h** |
+
+- **Spot price:** $8.60/h (2026-11-26).
+- **Expected spend:** about $30–35.
+- **Hard stop:** the instance self-terminates after 6 h (`shutdown -h +360`, terminate on shutdown). That caps spend at about $52.
+- **Compile cache:** saved to S3 at the end, so round 2 skips most of the compile step.
 - **Tags:**
   - `Project=covex-neuron`
   - `Experiment=2x-round1`
   - `Owner=<launcher>`
-  - `AutoTerminate=16h`
+  - `AutoTerminate=6h`
 - **Results** go to `benchmarks/results/2026-11-xx-qwen3-8b-round1/` on this branch: raw JSON, server logs and summary.
 
 ## Round 2 (decided by round 1)
