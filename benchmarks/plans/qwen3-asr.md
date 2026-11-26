@@ -15,18 +15,44 @@ Upstream `main`, plus these commits. Every change sits behind its own flag and i
 
 ## Arms
 
-All arms run on one trn2.48xlarge, each on 2 chips, concurrently. Settings are in `benchmarks/asr/arm_config.sh`.
+All 8 arms run on one trn2.48xlarge, each on its own 2 chips, concurrently. Settings are in `benchmarks/asr/arm_config.sh`.
 
-| Arm | Contents |
-|---|---|
-| **S** | stock code paths. Dax's bs8 config, extended to 16 sequences. |
-| **D** | S + Dax's encoder MLP kernel |
-| **DS** | D + Susmit's overcommit and 128-token prompt buckets |
-| **DSM** | DS + two prefills per step (experimental, MRv1) |
+| Arm | Contents | Purpose |
+|---|---|---|
+| **S** | stock, Dax's buckets [512, 1024] | reference, same as Dax's 136 audio-s/s |
+| **S2** | stock, prompt buckets [128, 256, 512, 1024] | **tuned stock: the baseline we claim against** |
+| **D** | S2 + Dax's encoder MLP kernel | Dax's change |
+| **DB** | D + Susmit #5, 128-step prompt buckets | padding |
+| **DM** | D + Susmit #3, two prefills per step (MRv1) | prefill serialization |
+| **DMB** | D + #3 + #5 | combined |
+| **DE1** | D with encoder `dp_size` 1 | probes the 8-way block padding plus the all-gather per clip |
+| **T4** | S2 at TP4 on one chip | probes the cross-chip cost of TP8 for a 1.7B model; compare per chip |
 
 **Common settings:**
-- TP8, `max_model_len` 1024, `max_num_seqs` 16, decode buckets 1/2/4/8/16
-- encoder DP8, greedy sampling, no prefix caching
+- `max_model_len` 1024, `max_num_seqs` 16, decode buckets 1/2/4/8/16
+- greedy sampling, no prefix caching
+
+**Susmit #4 (KV overcommit) is left out.** At `max_model_len` 1024, KV is not the limit.
+
+## Diagnosis from Dax's data (`compare.py` on his results)
+
+| | c1 | c8 | c1 → c8 |
+|---|---|---|---|
+| Trn2 TP8 stock, audio-s/s | 60.0 | 136.0 | 2.3x |
+| 8 × L4 TP8, audio-s/s | 46.0 | 202.1 | 4.4x |
+| Trn2 E2E p50 | 103 ms | 371 ms | |
+| Trn2 TTFT p50 (streaming) | 51 ms | 133 ms | |
+| Trn2 ITL p50 | 2.77 ms | 3.80 ms | |
+
+**What it shows:**
+- Trainium wins at one user and loses at eight.
+- Decode is small: about 20 output tokens at ~3 ms each.
+- The growth is in prefill and queueing. That fits serialized prefills: one per step, never mixed with decode.
+
+**The run checks this with:**
+- `/metrics` captured before and after each arm (queue, prefill, decode and TTFT histograms; padding counters)
+- the per-stage profiles
+- a 30 s py-spy sample of the API server under c8 load
 
 ## Measurements
 
@@ -49,8 +75,8 @@ All arms run on one trn2.48xlarge, each on 2 chips, concurrently. Settings are i
 
 **Expected:**
 - **D vs S:** about +18%, if it reproduces on the current base.
-- **DS and DSM:** no estimate. Susmit's changes have not run on this model.
-- **To beat 8 × L4 (202):** we need about +26% over D.
+- **DM and DMB:** the largest c8 gain if prefill serialization dominates. This is an estimate; the metrics will show it.
+- **To beat 8 × L4 (202):** we need about +49% over S.
 
 ## Other platforms
 
@@ -62,8 +88,8 @@ All arms run on one trn2.48xlarge, each on 2 chips, concurrently. Settings are i
 
 ## Time and cost
 
-- **Time on the instance:** about 2 h (image, model download, compile, the benchmark matrix, the WER run and profiles).
-- **Cost:** about $17 at $8.60/h Spot.
+- **Time on the instance:** about 2–2.5 h (8 arms compile in parallel, then the benchmark matrix, the WER run and profiles).
+- **Cost:** about $17–22 at $8.60/h Spot.
 - **Hard stop:** 3 h, so at most about $26.
 
 **Launch** with `benchmarks/scripts/launch_round1.sh` from `exp/2x-round1` (`STOP_MIN=180`). Then on the instance:
