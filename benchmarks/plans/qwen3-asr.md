@@ -24,7 +24,7 @@ All 8 arms run on one trn2.48xlarge, each on its own 2 chips, concurrently. Sett
 | **D** | S2 + Dax's encoder MLP kernel | Dax's change |
 | **DB** | D + Susmit #5, 128-step prompt buckets | padding |
 | **DM** | D + Susmit #3, two prefills per step (MRv1) | prefill serialization |
-| **DMB** | D + #3 + #5 | combined |
+| **DL** | D + encoder `norm2` LayerNorm folded into the audio MLP NKI kernel (`COVEX_ASR_ENCODER_LN_IN_MLP=1`, ours) | first custom-kernel step on top of Dax |
 | **DE1** | D with encoder `dp_size` 1 | probes the 8-way block padding plus the all-gather per clip |
 | **T4** | S2 at TP4 on one chip | probes the cross-chip cost of TP8 for a 1.7B model; compare per chip |
 
@@ -88,7 +88,8 @@ All 8 arms run on one trn2.48xlarge, each on its own 2 chips, concurrently. Sett
 
 **Expected:**
 - **D vs S:** about +18%, if it reproduces on the current base.
-- **DM and DMB:** the largest c8 gain if prefill serialization dominates. This is an estimate; the metrics will show it.
+- **DM:** the largest c8 gain if prefill serialization dominates. This is an estimate; the metrics will show it.
+- **DL vs D:** removes one torch LayerNorm per encoder layer; small, sized by the stage pass. WER must hold.
 - **To beat 8 × L4 (202):** we need about +49% over S.
 
 ## Other platforms
