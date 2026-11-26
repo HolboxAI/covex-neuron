@@ -15,15 +15,15 @@ Upstream `main`, plus these commits. Every change sits behind its own flag and i
 
 ## Arms
 
-All 8 arms run on one trn2.48xlarge, each on its own 2 chips, concurrently. Settings are in `benchmarks/asr/arm_config.sh`.
+All 8 arms run on one trn2.48xlarge, each on its own 2 chips, concurrently. Stock at Dax's defaults (S, 136 audio-s/s at c8) is already measured, so it is not rerun. Settings are in `benchmarks/asr/arm_config.sh`.
 
 | Arm | Contents | Purpose |
 |---|---|---|
-| **S** | stock, Dax's buckets [512, 1024] | reference, same as Dax's 136 audio-s/s |
 | **S2** | stock, prompt buckets [128, 256, 512, 1024] | **tuned stock: the baseline we claim against** |
 | **D** | S2 + Dax's encoder MLP kernel | Dax's change |
 | **DB** | D + Susmit #5, 128-step prompt buckets | padding |
 | **DM** | D + Susmit #3, two prefills per step (MRv1) | prefill serialization |
+| **DMBL** | D + #3 + #5 + LN-in-MLP | **the full COVEX stack: the headline number** |
 | **DL** | D + encoder `norm2` LayerNorm folded into the audio MLP NKI kernel (`COVEX_ASR_ENCODER_LN_IN_MLP=1`, ours) | first custom-kernel step on top of Dax |
 | **DE1** | D with encoder `dp_size` 1 | probes the 8-way block padding plus the all-gather per clip |
 | **T4** | S2 at TP4 on one chip | probes the cross-chip cost of TP8 for a 1.7B model; compare per chip |
@@ -66,7 +66,7 @@ All 8 arms run on one trn2.48xlarge, each on its own 2 chips, concurrently. Sett
 ## Measurements
 
 - **Throughput and latency:** Dax's `benchmark.py`, 200 samples, concurrency 1, 4, 8 and 16, 3 rounds. Reports E2E, RTF, TTFT, ITL, audio-s/s and WER.
-- **Accuracy:** full LibriSpeech test-clean (2,620 utterances) WER on S and D. This settles the 2.45% vs 2.53% question.
+- **Accuracy:** full LibriSpeech test-clean (2,620 utterances) WER on every arm. This settles the 2.45% vs 2.53% question.
 - **Stages:** each arm restarted with `PROFILE=1` (vllm-neuron built-in profiler, system + device profiles on all 8 ranks). One window at concurrency 8.
   - `neuron-explorer view --output-format perfetto` produces the traces.
   - `summarize_profile.py` writes `profiles/<arm>/STAGES.md`: busy time per stage (collective, attention, MLP, matmul, norm, DMA, sampling, host) and the top 25 slices.

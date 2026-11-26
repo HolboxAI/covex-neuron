@@ -2,14 +2,14 @@
 # One-shot round on a trn2.48xlarge: 8 arms on chip pairs 0-7 (all 16 chips), all at once.
 # 1) all arms timed (3 repeats)  2) full test-clean WER, every arm  3) per-stage pass for S2 and D (stage_pass.sh)  4) solo S2 controls.
 set -euo pipefail
-HERE=$(cd "$(dirname "$0")" && pwd); ARMS=(S S2 D DB DM DL DE1 T4)
+HERE=$(cd "$(dirname "$0")" && pwd); ARMS=(S2 D DB DM DL DMBL DE1 T4)   # S (Dax defaults) is already measured: 136 audio-s/s at c8
 wait_up() { for _ in $(seq 1 360); do curl -sf "http://127.0.0.1:$1/health" > /dev/null && return 0; sleep 10; done; echo "port $1 not up" >&2; return 1; }
 start_all() { for i in "${!ARMS[@]}"; do PROFILE=${1:-0} "$HERE/serve.sh" "${ARMS[$i]}" "$i" "$((8000 + i))" & done; for i in "${!ARMS[@]}"; do wait_up "$((8000 + i))" || true; done; }
 stop_all() { pkill -f "vllm serve" || true; sleep 15; }
 
 start_all 0                                              # compiles in parallel; the compile cache is reused below
-"$HERE/bench.sh" S2-warm 8001 32 1 > /dev/null            # downloads the clips
-python3 "$HERE/prompt_tokens.py" 8001 "${CLIENT_DIR:-$HOME/qwen3-asr-inference-cuda-trainium}" 200 | tee prompt_tokens.json
+"$HERE/bench.sh" S2-warm 8000 32 1 > /dev/null            # downloads the clips
+python3 "$HERE/prompt_tokens.py" 8000 "${CLIENT_DIR:-$HOME/qwen3-asr-inference-cuda-trainium}" 200 | tee prompt_tokens.json
 # 200 clips x 3 rounds = 600 requests per concurrency level (75 waves at c8); repeated 3x for the median.
 for rep in 1 2 3; do
   for i in "${!ARMS[@]}"; do "$HERE/bench.sh" "${ARMS[$i]}-r$rep" "$((8000 + i))" 200 1,4,8,16 & done; wait

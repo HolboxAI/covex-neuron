@@ -7,6 +7,7 @@
 #   DB   D  + Susmit #5 linear prompt buckets, step 128 (128..1024)
 #   DM   D  + Susmit #3 two prefills per step (MRv1 runner; report ITL)
 #   DL   D  + encoder norm2 LayerNorm folded into the audio MLP NKI kernel      (COVEX_ASR_ENCODER_LN_IN_MLP=1)
+#   DMBL full COVEX stack: D + #3 + #5 + LN-in-MLP                               (the README headline arm)
 #   DE1  D  with encoder dp_size 1 (no 8-way block padding + all_gather per clip)    (setting probe)
 #   T4   S2 at TP4 on one chip                                                       (setting probe; compare per chip)
 arm_config() {
@@ -19,6 +20,8 @@ arm_config() {
     DB)  export VLLM_NEURON_ASR_AUDIO_MLP_NKI=1; buckets='"num_batched_tokens_bucket_step": 128,' ;;
     DM)  export VLLM_NEURON_ASR_AUDIO_MLP_NKI=1; extra='"max_prefills_per_batch": 2,' ;;
     DL)  export VLLM_NEURON_ASR_AUDIO_MLP_NKI=1 COVEX_ASR_ENCODER_LN_IN_MLP=1 ;;
+    DMBL) export VLLM_NEURON_ASR_AUDIO_MLP_NKI=1 COVEX_ASR_ENCODER_LN_IN_MLP=1
+         buckets='"num_batched_tokens_bucket_step": 128,'; extra='"max_prefills_per_batch": 2,' ;;
     DE1) export VLLM_NEURON_ASR_AUDIO_MLP_NKI=1; enc_dp=1 ;;
     T4)  ARM_TP=4; enc_dp=4 ;;
     *) echo "unknown arm $arm" >&2; return 2 ;;
