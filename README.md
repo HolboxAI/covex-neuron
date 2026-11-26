@@ -1,15 +1,8 @@
 # COVEX Neuron
 
-**COVEX Neuron is a fork of [vllm-project/vllm-neuron](https://github.com/vllm-project/vllm-neuron), maintained by [HolboxAI](https://github.com/HolboxAI). It focuses on higher tokens/s on AWS Trainium.**
+COVEX Neuron is a fork of [vllm-project/vllm-neuron](https://github.com/vllm-project/vllm-neuron) maintained by [HolboxAI](https://github.com/HolboxAI). It ships Trainium performance improvements ahead of upstream releases. Each change is benchmarked against stock vllm-neuron at identical settings, gated by an environment flag, and proposed upstream when it applies beyond one model.
 
-- **Same API as vllm-neuron.** Install and serve exactly as described in the upstream README below.
-- **Synced with upstream every night.** The `upstream-main` branch mirrors `vllm-project/vllm-neuron` `main`. An automatic PR merges it into `main`.
-- **Only measured wins land in `main`.** Every performance change carries a before/after benchmark against stock vllm-neuron at the exact same settings. Optimizations are scoped per model and turn on by default only for the models they were validated on. See [CONTRIBUTING-COVEX.md](CONTRIBUTING-COVEX.md).
-- **Every COVEX change is listed in [COVEX_CHANGES.md](COVEX_CHANGES.md)** with its flag, result and upstream status. Each is one signed-off commit that anyone can cherry-pick into stock vllm-neuron.
-- **Generally useful changes are sent upstream** to vllm-neuron. COVEX exists so customers get the wins now instead of waiting for the next upstream release.
-- **For production, pin a release tag** (`covex-<upstream release>-<n>`), not `main`.
-
-## Install COVEX Neuron
+## Installation
 
 ```bash
 git clone https://github.com/HolboxAI/covex-neuron.git
@@ -17,36 +10,31 @@ cd covex-neuron
 pip install --extra-index-url=https://pip.repos.neuron.amazonaws.com -e .
 ```
 
-This replaces the upstream install step in the README below. Everything else there (instance setup, `vllm serve`, model support) applies unchanged. To get stock vllm-neuron behavior for any COVEX optimization, set its flag to `0` (see the table).
+For production, check out a release tag (`covex-<upstream version>-<n>`) instead of `main`. Usage, instance setup and supported models are the same as upstream (below).
 
-## COVEX vs stock vllm-neuron
+## Performance vs stock vllm-neuron
 
-Each row compares the same model, instance, Neuron SDK, parallelism, dataset and concurrency. Only the code under test differs. Raw results live in [`benchmarks/results/`](benchmarks/results/). The protocol is in [`benchmarks/README.md`](benchmarks/README.md).
+This section lists only changes merged into `main` that outperform stock vllm-neuron at identical settings.
 
-**Baseline:** each row was measured with the optimization off vs on, on the vllm-neuron base named in its results file. Rows measured on an older base are re-run on current `main` (flag off vs on, same commit) before the next release. The Qwen3-ASR row below was measured on vllm-neuron 0.29.0.1.2.0 with 32 LibriSpeech samples. A re-run on current `main` and a full test-clean WER (2,620 utterances) are pending.
+Results are re-measured against the current upstream base whenever upstream releases or changes code that a COVEX change depends on. The figures are updated each time. A change whose gain falls below the threshold in [CONTRIBUTING-COVEX.md](CONTRIBUTING-COVEX.md) is removed from this table and reviewed for removal from the fork.
 
-| Model | Setup | Metric | vllm-neuron 0.29.0.1.2.0 | COVEX | Change | Status |
-|---|---|---|---|---|---|---|
-| Qwen3-ASR-1.7B (BF16) | trn2.48xlarge, SDK 2.33.1, decoder TP8 + encoder DP8, LibriSpeech, 32 samples | Throughput, concurrency 8 | 136 audio-s/s | 160.7 audio-s/s | **+18.1%** | In review |
-| | | TTFT p50, concurrency 1 / 8 | 0.051 s / – | 0.038 s / – | **−25% / −46%** | |
-| | | E2E latency p50, concurrency 1 / 8 | 0.103 s / – | 0.091 s / – | **−11.6% / −26.6%** | |
-| | | WER | 2.45% | 2.53% | +0.08 pt | |
+No changes have been merged yet.
 
-**In progress (no numbers yet, so not in `main`):**
-- multi-prefill batching ([upstream #124](https://github.com/vllm-project/vllm-neuron/pull/124))
-- KV-cache overcommit with recompute preemption
-- linear bucket steps to cut padding
-- Qwen3-32B BF16 decode MLP NKI kernel
-- Qwen3.5 hybrid support plus weight transfer and sleep/wake for RL rollout ([upstream #98](https://github.com/vllm-project/vllm-neuron/pull/98))
+## Changes and upstream status
+
+[COVEX_CHANGES.md](COVEX_CHANGES.md) lists every change carried on top of upstream, with its flag, result and upstream status. Each change is a single signed-off commit and can be cherry-picked onto stock vllm-neuron.
 
 ## Branches
 
-| Branch | What it is |
+| Branch | Purpose |
 |---|---|
-| `main` | Upstream plus validated COVEX optimizations. Protected: PR, review and benchmark gate. |
-| `upstream-main` | Exact mirror of `vllm-project/vllm-neuron` `main`, updated nightly. Never commit here. |
-| `feat/*`, `port/*` | Work in progress, behind env flags. |
-| `legacy/runner-sdk` | The earlier COVEX two-line PyTorch/HF to Trainium runner (PyPI `covex-neuron` 0.0.1.dev5). |
+| `main` | Upstream plus merged COVEX changes |
+| `upstream-main` | Mirror of upstream `main`, updated nightly |
+| `legacy/runner-sdk` | Earlier COVEX runner SDK (PyPI `covex-neuron` 0.0.1.dev5) |
+
+## Contributing
+
+See [CONTRIBUTING-COVEX.md](CONTRIBUTING-COVEX.md) and [benchmarks/README.md](benchmarks/README.md).
 
 ---
 

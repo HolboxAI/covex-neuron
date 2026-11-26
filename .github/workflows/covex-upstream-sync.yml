@@ -41,12 +41,22 @@ jobs:
           echo "main is $behind upstream commits behind"
           if [ "$behind" = "0" ]; then exit 0; fi
           sha=$(git rev-parse origin/upstream-main)
+          # COVEX-modified files that upstream also changed: their benchmarks must be re-run.
+          comm -12 <(git diff --name-only origin/main...origin/upstream-main | sort) \
+                   <(git diff --name-only origin/upstream-main...origin/main | sort) > overlap.txt || true
+          if [ -s overlap.txt ]; then
+            note=$'\n\nRe-run the benchmarks for COVEX changes touching these files (CONTRIBUTING-COVEX.md, section 5):\n'"$(sed 's/^/- /' overlap.txt)"
+          else
+            note=$'\n\nNo COVEX-modified files changed upstream.'
+          fi
           pr=$(gh pr list --head upstream-main --base main --state open --json number --jq '.[0].number // empty')
           if [ -z "$pr" ]; then
             gh pr create --head upstream-main --base main \
               --title "Sync upstream vllm-neuron ($(date -u +%F))" \
               --label no-perf-change \
-              --body "Automatic nightly sync of vllm-project/vllm-neuron main ($behind new commits). Merge after a smoke test. If it conflicts, the author of the conflicting COVEX change resolves it (CONTRIBUTING-COVEX.md, section 4)."
+              --body "Automatic nightly sync of vllm-project/vllm-neuron main ($behind new commits). Merge after a smoke test. If it conflicts, the author of the conflicting COVEX change resolves it (CONTRIBUTING-COVEX.md, section 7).$note"
+          else
+            gh pr edit "$pr" --body "Automatic nightly sync of vllm-project/vllm-neuron main ($behind new commits). Merge after a smoke test. If it conflicts, the author of the conflicting COVEX change resolves it (CONTRIBUTING-COVEX.md, section 7).$note"
           fi
           # PRs opened by GITHUB_TOKEN do not trigger other workflows, so report the gate directly.
           gh api -X POST "repos/${GITHUB_REPOSITORY}/statuses/${sha}" \
