@@ -50,9 +50,9 @@ from .weight_loader import (
 
 # Route the audio MLP (up -> GELU -> down) through the shared nkilib MLP kernel
 # with ``skip_gate=True`` instead of raw aten matmuls. Gated by
-# ``VLLM_NEURON_ASR_AUDIO_MLP_NKI`` (off by default) because the nkilib
-# skip_gate/GELU kernel path is not yet exercised by a shipping model; keep the
-# raw-matmul fallback until it is hardware-validated for accuracy and latency.
+# ``VLLM_NEURON_ASR_AUDIO_MLP_NKI`` (COVEX: on by default, validated on Trn2;
+# see benchmarks/results/2026-11-24-qwen3-asr-1.7b-audio-mlp-nki.md). Set it
+# to 0 to fall back to the stock raw-matmul path.
 _AUDIO_MLP_NKI = envs.VLLM_NEURON_ASR_AUDIO_MLP_NKI
 
 
