@@ -8,8 +8,13 @@ start_all() { for i in "${!ARMS[@]}"; do PROFILE=${1:-0} "$HERE/serve.sh" "${ARM
 stop_all() { pkill -f "vllm serve" || true; sleep 15; }
 
 start_all 0                                              # compiles in parallel; the compile cache is reused below
-for i in "${!ARMS[@]}"; do "$HERE/bench.sh" "${ARMS[$i]}" "$((8000 + i))" 200 1,4,8,16 & done; wait
-for i in 0 2; do "$HERE/bench.sh" "${ARMS[$i]}-wer" "$((8000 + i))" 2620 16 & done; wait   # full test-clean WER, S and D
+"$HERE/bench.sh" S2-warm 8001 32 1 > /dev/null            # downloads the clips
+python3 "$HERE/prompt_tokens.py" 8001 "${CLIENT_DIR:-$HOME/qwen3-asr-inference-cuda-trainium}" 200 | tee prompt_tokens.json
+# 200 clips x 3 rounds = 600 requests per concurrency level (75 waves at c8); repeated 3x for the median.
+for rep in 1 2 3; do
+  for i in "${!ARMS[@]}"; do "$HERE/bench.sh" "${ARMS[$i]}-r$rep" "$((8000 + i))" 200 1,4,8,16 & done; wait
+done
+for i in "${!ARMS[@]}"; do ROUNDS=1 "$HERE/bench.sh" "${ARMS[$i]}-wer" "$((8000 + i))" 2620 16 & done; wait   # full test-clean WER, every arm
 stop_all
 start_all 1
 for i in "${!ARMS[@]}"; do "$HERE/profile.sh" "${ARMS[$i]}" "$((8000 + i))" 8 || echo "profile ${ARMS[$i]} failed"; done
@@ -18,6 +23,11 @@ if command -v py-spy > /dev/null; then
   ( "$HERE/bench.sh" S2-pyspy 8001 64 8 & ) ; sleep 20
   py-spy record -d 30 -o profiles/S2-api-server.svg -p "$(pgrep -f 'vllm serve.*--port 8001' | head -1)" || true; wait
 fi
+stop_all
+# Host-contention check: S2 alone, unpinned, whole host. If it beats S2-in-parallel by >5%, report solo numbers.
+SOLO=1 "$HERE/serve.sh" S2 1 8001 & wait_up 8001
+for rep in 1 2 3; do SOLO=1 "$HERE/bench.sh" "S2solo-r$rep" 8001 200 1,4,8,16; done
+stop_all
 python3 "$HERE/compare.py" results > RESULTS.md
 stop_all
 echo "done: results/*.json, profiles/*/STAGES.md, logs/*"

@@ -18,7 +18,11 @@ fi
 mkdir -p logs
 { echo "arm=$ARM tp=$ARM_TP pair=$PAIR cores=$NEURON_RT_VISIBLE_CORES commit=$(git -C "$HERE" rev-parse --short HEAD) profile=${PROFILE:-0}"
   env | grep -E '^(VLLM_NEURON|COVEX|NEURON_RT)' | sort; echo "$CFG"; } > "logs/$ARM.meta"
-exec vllm serve "$MODEL_DIR" \
+# Equal, disjoint host CPUs per arm (8 arms x 24 vCPUs on the 192-vCPU host) so arms do not steal host time
+# from each other. SOLO=1 drops the pinning for the solo S2 re-run.
+CPUS="$((PAIR * 24))-$((PAIR * 24 + 23))"; PIN=(taskset -c "$CPUS"); [ "${SOLO:-0}" = 1 ] && PIN=()
+echo "cpus=${PIN[*]:-all}" >> "logs/$ARM.meta"
+exec "${PIN[@]}" vllm serve "$MODEL_DIR" \
   --served-model-name qwen3-asr-1.7b --dtype bfloat16 \
   --tensor-parallel-size "$ARM_TP" --max-model-len 1024 \
   --max-num-seqs 16 --max-num-batched-tokens 1024 \

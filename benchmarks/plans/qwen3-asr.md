@@ -49,6 +49,14 @@ All 8 arms run on one trn2.48xlarge, each on its own 2 chips, concurrently. Sett
 - Decode is small: about 20 output tokens at ~3 ms each.
 - The growth is in prefill and queueing. That fits serialized prefills: one per step, never mixed with decode.
 
+**Measurement hygiene:**
+- **Host CPU isolation:** each arm's server and its client are pinned to their own 24 of the host's 192 vCPUs.
+- **Solo control:** S2 is re-run alone and unpinned at the end. If solo beats parallel by more than 5%, the parallel run was host-limited, so we report the solo numbers.
+- **Request volume:** 200 clips × 3 rounds = 600 requests per concurrency level (75 waves at c8). The whole matrix is repeated 3 times; we report the median and the min–max spread.
+- **Accuracy:** full test-clean WER (2,620 utterances) for every arm, not only the winners.
+- **Prompt length:** exact prompt_tokens per clip from the chat endpoint's `usage` (`prompt_tokens.py`), to confirm S2's 128-token smallest bucket.
+- **Baseline:** S2 (tuned stock) is the one we claim against. If S2's hand-picked buckets already capture the padding win, Susmit #5 (DB vs S2) may add about 0%, and we report that as it is.
+
 **The run checks this with:**
 - `/metrics` captured before and after each arm (queue, prefill, decode and TTFT histograms; padding counters)
 - the per-stage profiles
@@ -88,11 +96,11 @@ All 8 arms run on one trn2.48xlarge, each on its own 2 chips, concurrently. Sett
 
 ## Time and cost
 
-- **Time on the instance:** about 2–2.5 h (8 arms compile in parallel, then the benchmark matrix, the WER run and profiles).
-- **Cost:** about $17–22 at $8.60/h Spot.
-- **Hard stop:** 3 h, so at most about $26.
+- **Time on the instance:** about 2.5–3 h (8 arms compile in parallel; 3 repeats of the matrix; full WER for all arms; profiles; the solo S2 control).
+- **Cost:** about $22–26 at $8.60/h Spot.
+- **Hard stop:** 3.5 h (`STOP_MIN=210`), so at most about $30.
 
-**Launch** with `benchmarks/scripts/launch_round1.sh` from `exp/2x-round1` (`STOP_MIN=180`). Then on the instance:
+**Launch** with `benchmarks/scripts/launch_round1.sh` from `exp/2x-round1` (`STOP_MIN=210`). Then on the instance:
 
 ```bash
 git clone -b exp/qwen3-asr https://github.com/HolboxAI/covex-neuron && cd covex-neuron
