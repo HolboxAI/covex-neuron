@@ -5,7 +5,9 @@
 - **Same API as vllm-neuron.** Install and serve exactly as described in the upstream README below.
 - **Synced with upstream every night.** The `upstream-main` branch mirrors `vllm-project/vllm-neuron` `main`. An automatic PR merges it into `main`.
 - **Only measured wins land in `main`.** Every performance change carries a before/after benchmark against stock vllm-neuron at the exact same settings. Optimizations are scoped per model and turn on by default only for the models they were validated on. See [CONTRIBUTING-COVEX.md](CONTRIBUTING-COVEX.md).
-- **Generally useful changes are sent upstream** to vllm-neuron.
+- **Every COVEX change is listed in [COVEX_CHANGES.md](COVEX_CHANGES.md)** with its flag, result and upstream status. Each is one signed-off commit that anyone can cherry-pick into stock vllm-neuron.
+- **Generally useful changes are sent upstream** to vllm-neuron. COVEX exists so customers get the wins now instead of waiting for the next upstream release.
+- **For production, pin a release tag** (`covex-<upstream release>-<n>`), not `main`.
 
 ## Install COVEX Neuron
 

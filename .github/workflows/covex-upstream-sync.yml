@@ -51,3 +51,5 @@ jobs:
           # PRs opened by GITHUB_TOKEN do not trigger other workflows, so report the gate directly.
           gh api -X POST "repos/${GITHUB_REPOSITORY}/statuses/${sha}" \
             -f state=success -f context=benchmark-gate -f description="Upstream sync: exempt from the benchmark gate"
+          gh api -X POST "repos/${GITHUB_REPOSITORY}/statuses/${sha}" \
+            -f state=success -f context=dco -f description="Upstream sync: exempt"

@@ -1,0 +1,34 @@
+name: covex-dco
+
+# Every commit in a PR into main must carry a Signed-off-by line, as
+# vllm-project/vllm-neuron requires. Upstream sync PRs are exempt.
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  dco:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Check Signed-off-by on every commit
+        env:
+          HEAD_REF: ${{ github.head_ref }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          if [ "$HEAD_REF" = "upstream-main" ]; then echo "Upstream sync: exempt."; exit 0; fi
+          bad=0
+          for c in $(git rev-list --no-merges "$BASE_SHA..$HEAD_SHA"); do
+            author=$(git log -1 --format='%an <%ae>' "$c")
+            if ! git log -1 --format=%B "$c" | grep -qi "^Signed-off-by: "; then
+              echo "::error::$c ($author) has no Signed-off-by. Fix: git rebase --signoff $BASE_SHA && git push --force-with-lease"
+              bad=1
+            fi
+          done
+          exit $bad

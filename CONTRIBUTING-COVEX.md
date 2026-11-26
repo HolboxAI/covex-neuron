@@ -37,12 +37,31 @@ A PR that changes runtime behavior merges only when all of these hold:
 
 PRs that don't change runtime behavior (docs, CI, tests, the upstream sync) take the `no-perf-change` label instead. The benchmark gate then skips them.
 
-## 3. Review
+## 3. Sign-off and the change registry
+
+- **DCO sign-off on every commit** (`git commit -s`). vllm-project/vllm-neuron requires it, and the `dco` check enforces it here too, so any change can go upstream without rewriting history.
+- **Squash-merge feature PRs.** One optimization becomes one commit on `main` that customers and the community can cherry-pick.
+- **Add or update the row in [COVEX_CHANGES.md](COVEX_CHANGES.md)** in the same PR: flag, default-on models, result, upstream status.
+
+## 4. Releases for customers
+
+- **Customers pin a release tag, not `main`.**
+- Tag format: `covex-<upstream release>-<n>`, e.g. `covex-0.29.0.1.2.0-1`.
+- **Each GitHub release states:**
+  - the upstream commit it is based on and the validated Neuron SDK
+  - the COVEX_CHANGES rows it contains
+  - benchmark links
+- **Cut a release when one of these happens:**
+  - a new validated win merges
+  - upstream ships a release (rebase the COVEX commits onto it in the release branch `covex/<upstream release>`)
+- **Never re-tag.** A fix gets a new `-<n+1>`.
+
+## 5. Review
 
 - Each PR needs one approving review from a code owner (see `.github/CODEOWNERS`).
 - The **benchmark-gate** check must pass. It verifies that the PR template's benchmark section is filled in and that a results file is in the diff.
 
-## 4. Upstream sync
+## 6. Upstream sync
 
 - **Nightly:** `upstream-main` fast-forwards to `vllm-project/vllm-neuron` `main`, and a PR `upstream-main → main` is opened or updated.
 - **Merging the sync PR:**
@@ -52,6 +71,9 @@ PRs that don't change runtime behavior (docs, CI, tests, the upstream sync) take
   - prefer new files and flags over edits to upstream files
   - put model-specific code in its model folder
 
-## 5. Upstreaming
+## 7. Upstreaming
 
-Tag generally useful PRs `upstream-candidate`, for example scheduler, bucketing and attention fixes that help every model. After they merge here, open the same change against `vllm-project/vllm-neuron` with DCO sign-off.
+- **The goal is to send every generally useful win upstream.** Examples: scheduler, bucketing, attention and kernel fixes that help any model.
+- Tag those PRs `upstream-candidate`. After merge, open the same commit against `vllm-project/vllm-neuron` from a branch cut from `upstream-main`.
+- Set the COVEX_CHANGES row to **Sent**, and to **Merged upstream** when it lands. The next sync then drops our copy.
+- COVEX exists so customers get the wins before the next upstream release, not to diverge.

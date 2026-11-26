@@ -4,6 +4,7 @@
 
 - Flag:
 - Default on for models:
+- Upstream: <!-- candidate / sent: vllm-project/vllm-neuron#N / COVEX-only (why) -->
 
 ## Benchmark
 
@@ -27,5 +28,6 @@
 - [ ] Same settings for baseline and change; median of 3 runs
 - [ ] At least +3% tok/s or −5% TTFT/ITL, with no metric worse by more than 2%
 - [ ] Flag off restores stock behavior
-- [ ] README results table updated
+- [ ] README results table and COVEX_CHANGES.md row updated
+- [ ] Every commit signed off (`git commit -s`, DCO, same as upstream)
 - [ ] `upstream-candidate` label added if this should go to vllm-project/vllm-neuron
