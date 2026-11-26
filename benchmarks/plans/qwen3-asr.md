@@ -86,6 +86,8 @@ All 8 arms run on one trn2.48xlarge, each on its own 2 chips, concurrently. Stoc
 | 1 × NVIDIA L4, vLLM | 107 | Dax, `results/cuda.json` |
 | 8 × NVIDIA L4 TP8, vLLM | 202 | Dax, `results/cuda_tp8.json` |
 
+**Reporting rule:** the headline is **DMBL vs S2 from this run**. Dax's earlier 136 audio-s/s comes from a different run (96 requests, unpinned, older base), so it is history only and never goes next to DMBL as a same-setup comparison.
+
 **Expected:**
 - **D vs S:** about +18%, if it reproduces on the current base.
 - **DM:** the largest c8 gain if prefill serialization dominates. This is an estimate; the metrics will show it.
