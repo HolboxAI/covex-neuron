@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# Run Dax's benchmark client (pinned commit) against one running arm.
+# Usage: bench.sh <ARM> <PORT> [NUM_SAMPLES=200] [CONCURRENCY=1,4,8,16]
+set -euo pipefail
+ARM=$1; PORT=$2; N=${3:-200}; CONC=${4:-1,4,8,16}
+CLIENT_DIR=${CLIENT_DIR:-$HOME/qwen3-asr-inference-cuda-trainium}
+[ -d "$CLIENT_DIR" ] || git clone -q https://github.com/HolboxAI/qwen3-asr-inference-cuda-trainium "$CLIENT_DIR"
+git -C "$CLIENT_DIR" checkout -q 4ce1ddb   # same client and dataset slice as the CUDA (1xL4, 8xL4) baselines
+mkdir -p results
+python3 "$CLIENT_DIR/benchmark/benchmark.py" --base-url "http://127.0.0.1:$PORT" --model qwen3-asr-1.7b \
+  --data-dir "$CLIENT_DIR/data" --num-samples "$N" --concurrency "$CONC" --rounds 3 --warmup 3 \
+  --label "trn2-$ARM" --output "results/$ARM.json"
