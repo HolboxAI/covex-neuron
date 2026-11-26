@@ -56,12 +56,27 @@ PRs that don't change runtime behavior (docs, CI, tests, the upstream sync) take
   - upstream ships a release (rebase the COVEX commits onto it in the release branch `covex/<upstream release>`)
 - **Never re-tag.** A fix gets a new `-<n+1>`.
 
-## 5. Review
+## 5. Keeping results current
+
+Every result is measured against a specific upstream commit, which is recorded in the "Verified against upstream" column.
+
+**When a change is re-measured:**
+- when upstream ships a release
+- when a sync PR touches files that a COVEX change modifies (the sync PR lists them)
+
+**How:** run the same benchmark with the flag off vs on at the new `main` commit.
+
+**After re-measuring:**
+- Update the figures and the upstream commit in the README, COVEX_CHANGES.md and the results file.
+- If stock has closed the gap and the change no longer meets section 2, remove its README row, then either drop the change or turn its default off.
+- If upstream merged an equivalent change, drop ours.
+
+## 6. Review
 
 - Each PR needs one approving review from a code owner (see `.github/CODEOWNERS`).
 - The **benchmark-gate** check must pass. It verifies that the PR template's benchmark section is filled in and that a results file is in the diff.
 
-## 6. Upstream sync
+## 7. Upstream sync
 
 - **Nightly:** `upstream-main` fast-forwards to `vllm-project/vllm-neuron` `main`, and a PR `upstream-main → main` is opened or updated.
 - **Merging the sync PR:**
@@ -71,7 +86,7 @@ PRs that don't change runtime behavior (docs, CI, tests, the upstream sync) take
   - prefer new files and flags over edits to upstream files
   - put model-specific code in its model folder
 
-## 7. Upstreaming
+## 8. Upstreaming
 
 - **The goal is to send every generally useful win upstream.** Examples: scheduler, bucketing, attention and kernel fixes that help any model.
 - Tag those PRs `upstream-candidate`. After merge, open the same commit against `vllm-project/vllm-neuron` from a branch cut from `upstream-main`.
