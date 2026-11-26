@@ -7,9 +7,21 @@
 - **Only measured wins land in `main`.** Every performance change carries a before/after benchmark against stock vllm-neuron at the exact same settings. Optimizations are scoped per model and turn on by default only for the models they were validated on. See [CONTRIBUTING-COVEX.md](CONTRIBUTING-COVEX.md).
 - **Generally useful changes are sent upstream** to vllm-neuron.
 
+## Install COVEX Neuron
+
+```bash
+git clone https://github.com/HolboxAI/covex-neuron.git
+cd covex-neuron
+pip install --extra-index-url=https://pip.repos.neuron.amazonaws.com -e .
+```
+
+This replaces the upstream install step in the README below. Everything else there (instance setup, `vllm serve`, model support) applies unchanged. To get stock vllm-neuron behavior for any COVEX optimization, set its flag to `0` (see the table).
+
 ## COVEX vs stock vllm-neuron
 
 Each row compares the same model, instance, Neuron SDK, parallelism, dataset and concurrency. Only the code under test differs. Raw results live in [`benchmarks/results/`](benchmarks/results/). The protocol is in [`benchmarks/README.md`](benchmarks/README.md).
+
+**Baseline:** each row was measured with the optimization off vs on, on the vllm-neuron base named in its results file. Rows measured on an older base are re-run on current `main` (flag off vs on, same commit) before the next release. The Qwen3-ASR row below was measured on vllm-neuron 0.29.0.1.2.0 with 32 LibriSpeech samples. A re-run on current `main` and a full test-clean WER (2,620 utterances) are pending.
 
 | Model | Setup | Metric | vllm-neuron 0.29.0.1.2.0 | COVEX | Change | Status |
 |---|---|---|---|---|---|---|
