@@ -4,7 +4,7 @@ Every change COVEX carries on top of upstream, in one place, so customers know w
 
 | Change | Flag (set `0` for stock behavior) | Default on for | Result | Upstream status | Commit / PR |
 |---|---|---|---|---|---|
-| Qwen3-ASR audio-encoder MLP on the nkilib NKI kernel | `VLLM_NEURON_ASR_AUDIO_MLP_NKI` | Qwen3-ASR | +18% audio-s/s at concurrency 8, TTFT −25% to −46% ([results](benchmarks/results/2026-11-24-qwen3-asr-1.7b-audio-mlp-nki.md)) | Candidate: not yet sent | In review |
+| Qwen3-ASR audio-encoder MLP on the nkilib NKI kernel | `VLLM_NEURON_ASR_AUDIO_MLP_NKI` | Qwen3-ASR | +18% audio-s/s at concurrency 8, TTFT −25% to −46% ([results](benchmarks/results/2026-11-24-qwen3-asr-1.7b-audio-mlp-nki.md)) | Candidate: not yet sent | PR #1 |
 
 **Upstream status values:**
 - **Candidate:** generally useful, to be sent to vllm-project/vllm-neuron.

@@ -77,6 +77,13 @@ if TYPE_CHECKING:
     # composers are the only sequence-parallel decode path, so a refused shape
     # or a disabled flag keeps the all-reduce path.
     VLLM_NEURON_QWEN3_SP_A2A: bool = True
+    # Route the Qwen3-ASR audio-encoder MLP through the shared nkilib NKI MLP
+    # kernel (skip_gate + GELU) instead of raw aten matmuls. COVEX: ON by default.
+    # Validated on trn2.48xlarge, SDK 2.33.1 (+18% audio-s/s at concurrency 8,
+    # TTFT -25% to -46%, WER 2.45% -> 2.53%); see
+    # benchmarks/results/2026-11-24-qwen3-asr-1.7b-audio-mlp-nki.md.
+    # Set VLLM_NEURON_ASR_AUDIO_MLP_NKI=0 to restore the stock raw-matmul path.
+    VLLM_NEURON_ASR_AUDIO_MLP_NKI: bool = True
     # Gather the fused sampling tail's rows with ONE all_gather over the 128-rank lm_head TP
     # group, in place of all_gather[TP] followed by all_gather[lm_head_dp].
     VLLM_NEURON_TAIL_FLAT_ROW_GATHER: bool = False
@@ -431,6 +438,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     "VLLM_NEURON_QWEN3_SP_A2A": lambda: (
         maybe_convert_bool(os.getenv("VLLM_NEURON_QWEN3_SP_A2A")) is not False
+    ),
+    "VLLM_NEURON_ASR_AUDIO_MLP_NKI": lambda: (
+        maybe_convert_bool(os.getenv("VLLM_NEURON_ASR_AUDIO_MLP_NKI")) is not False
     ),
     # Gather the fused sampling tail's rows with ONE all_gather over the 128-rank lm_head TP group,
     # in place of all_gather[TP=8] in the giga-kernel followed by all_gather[lm_head_dp=16].

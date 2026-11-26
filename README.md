@@ -27,7 +27,7 @@ Each row compares the same model, instance, Neuron SDK, parallelism, dataset and
 
 | Model | Setup | Metric | vllm-neuron 0.29.0.1.2.0 | COVEX | Change | Status |
 |---|---|---|---|---|---|---|
-| Qwen3-ASR-1.7B (BF16) | trn2.48xlarge, SDK 2.33.1, decoder TP8 + encoder DP8, LibriSpeech, 32 samples | Throughput, concurrency 8 | 136 audio-s/s | 160.7 audio-s/s | **+18.1%** | In review |
+| Qwen3-ASR-1.7B (BF16) | trn2.48xlarge, SDK 2.33.1, decoder TP8 + encoder DP8, LibriSpeech, 32 samples | Throughput, concurrency 8 | 136 audio-s/s | 160.7 audio-s/s | **+18.1%** | Default on (PR #1) |
 | | | TTFT p50, concurrency 1 / 8 | 0.051 s / – | 0.038 s / – | **−25% / −46%** | |
 | | | E2E latency p50, concurrency 1 / 8 | 0.103 s / – | 0.091 s / – | **−11.6% / −26.6%** | |
 | | | WER | 2.45% | 2.53% | +0.08 pt | |
