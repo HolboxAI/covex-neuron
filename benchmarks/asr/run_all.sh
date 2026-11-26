@@ -24,9 +24,14 @@ if command -v py-spy > /dev/null; then
   py-spy record -d 30 -o profiles/S2-api-server.svg -p "$(pgrep -f 'vllm serve.*--port 8001' | head -1)" || true; wait
 fi
 stop_all
-# Host-contention check: S2 alone, unpinned, whole host. If it beats S2-in-parallel by >5%, report solo numbers.
+# Neighbour check: S2 alone on the SAME 24 pinned vCPUs. If it beats S2-in-parallel by >5%, neighbours skewed
+# the parallel run and the solo numbers are reported.
+"$HERE/serve.sh" S2 1 8001 & wait_up 8001
+for rep in 1 2 3; do "$HERE/bench.sh" "S2solo-r$rep" 8001 200 1,4,8,16; done
+stop_all
+# Host-size check: S2 alone, unpinned (all 192 vCPUs). If it beats pinned solo, 24 vCPUs is itself a cap.
 SOLO=1 "$HERE/serve.sh" S2 1 8001 & wait_up 8001
-for rep in 1 2 3; do SOLO=1 "$HERE/bench.sh" "S2solo-r$rep" 8001 200 1,4,8,16; done
+SOLO=1 "$HERE/bench.sh" "S2free-r1" 8001 200 1,4,8,16
 stop_all
 python3 "$HERE/compare.py" results > RESULTS.md
 stop_all

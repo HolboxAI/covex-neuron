@@ -51,7 +51,8 @@ All 8 arms run on one trn2.48xlarge, each on its own 2 chips, concurrently. Sett
 
 **Measurement hygiene:**
 - **Host CPU isolation:** each arm's server and its client are pinned to their own 24 of the host's 192 vCPUs.
-- **Solo control:** S2 is re-run alone and unpinned at the end. If solo beats parallel by more than 5%, the parallel run was host-limited, so we report the solo numbers.
+- **Neighbour check:** S2 is re-run alone on the same 24 pinned vCPUs (3 repeats). If solo beats parallel by more than 5%, neighbours skewed the parallel run, so we report the solo numbers.
+- **Host-size check:** one more S2 run alone and unpinned. If it beats the pinned solo run, 24 vCPUs is itself a cap.
 - **Request volume:** 200 clips × 3 rounds = 600 requests per concurrency level (75 waves at c8). The whole matrix is repeated 3 times; we report the median and the min–max spread.
 - **Accuracy:** full test-clean WER (2,620 utterances) for every arm, not only the winners.
 - **Prompt length:** exact prompt_tokens per clip from the chat endpoint's `usage` (`prompt_tokens.py`), to confirm S2's 128-token smallest bucket.
