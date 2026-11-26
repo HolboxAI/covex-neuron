@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # One-shot round on a trn2.48xlarge: 8 arms on chip pairs 0-7 (all 16 chips), all at once.
-# 1) serve + benchmark every arm   2) full test-clean WER on S and D   3) restart with PROFILE=1 and capture stages.
+# 1) all arms timed (3 repeats)  2) full test-clean WER, every arm  3) per-stage pass for S2 and D (stage_pass.sh)  4) solo S2 controls.
 set -euo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd); ARMS=(S S2 D DB DM DMB DE1 T4)
 wait_up() { for _ in $(seq 1 360); do curl -sf "http://127.0.0.1:$1/health" > /dev/null && return 0; sleep 10; done; echo "port $1 not up" >&2; return 1; }
@@ -16,13 +16,7 @@ for rep in 1 2 3; do
 done
 for i in "${!ARMS[@]}"; do ROUNDS=1 "$HERE/bench.sh" "${ARMS[$i]}-wer" "$((8000 + i))" 2620 16 & done; wait   # full test-clean WER, every arm
 stop_all
-start_all 1
-for i in "${!ARMS[@]}"; do "$HERE/profile.sh" "${ARMS[$i]}" "$((8000 + i))" 8 || echo "profile ${ARMS[$i]} failed"; done
-# Host-side check (is the API server the cap at c8?): 30 s py-spy sample of the S2 server while it is loaded.
-if command -v py-spy > /dev/null; then
-  ( "$HERE/bench.sh" S2-pyspy 8001 64 8 & ) ; sleep 20
-  py-spy record -d 30 -o profiles/S2-api-server.svg -p "$(pgrep -f 'vllm serve.*--port 8001' | head -1)" || true; wait
-fi
+"$HERE/stage_pass.sh"                                     # per-stage pass (S2, D at c1/c8): metrics, py-spy, device profiles
 stop_all
 # Neighbour check: S2 alone on the SAME 24 pinned vCPUs. If it beats S2-in-parallel by >5%, neighbours skewed
 # the parallel run and the solo numbers are reported.

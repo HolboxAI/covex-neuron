@@ -71,6 +71,10 @@ All 8 arms run on one trn2.48xlarge, each on its own 2 chips, concurrently. Sett
   - `neuron-explorer view --output-format perfetto` produces the traces.
   - `summarize_profile.py` writes `profiles/<arm>/STAGES.md`: busy time per stage (collective, attention, MLP, matmul, norm, DMA, sampling, host) and the top 25 slices.
   - The raw `.pftrace` files open in https://ui.perfetto.dev.
+- **Per-stage pass** (`stage_pass.sh`): S2 and D at c1 and c8, about 50 requests each. It runs after the timed runs because profiling slows serving down.
+  - **Request side:** `/metrics` deltas plus the client E2E give `stages/<arm>.md`. Columns: host + HTTP + preprocess (client minus server E2E), queue, prefill (encoder + decoder), decode, other, all in ms.
+  - **Host side:** py-spy flame graph of the API server and engine core at c8 (`--subprocesses`), so mel extraction, block planning and scheduler time show up as frames. Needs `sudo` or ptrace allowed.
+  - **Device side:** Neuron Explorer system and device profiles at c1 and c8. Kernel time per encoder layer (qkv, flash attention, o_proj, LayerNorm, MLP), conv frontend, projector, DP all-gather, decoder prefill and decode (megakernel, all-reduce, MLP) is summarized into `profiles/<arm>-c<c>/STAGES.md`.
 - **Everything at once:** `benchmarks/asr/run_all.sh` runs the whole round.
 
 ## Known numbers (same client and dataset)
