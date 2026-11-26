@@ -1,3 +1,43 @@
+# COVEX Neuron
+
+**COVEX Neuron is a fork of [vllm-project/vllm-neuron](https://github.com/vllm-project/vllm-neuron), maintained by [HolboxAI](https://github.com/HolboxAI). It focuses on higher tokens/s on AWS Trainium.**
+
+- **Same API as vllm-neuron.** Install and serve exactly as described in the upstream README below.
+- **Synced with upstream every night.** The `upstream-main` branch mirrors `vllm-project/vllm-neuron` `main`. An automatic PR merges it into `main`.
+- **Only measured wins land in `main`.** Every performance change carries a before/after benchmark against stock vllm-neuron at the exact same settings. Optimizations are scoped per model and turn on by default only for the models they were validated on. See [CONTRIBUTING-COVEX.md](CONTRIBUTING-COVEX.md).
+- **Generally useful changes are sent upstream** to vllm-neuron.
+
+## COVEX vs stock vllm-neuron
+
+Each row compares the same model, instance, Neuron SDK, parallelism, dataset and concurrency. Only the code under test differs. Raw results live in [`benchmarks/results/`](benchmarks/results/). The protocol is in [`benchmarks/README.md`](benchmarks/README.md).
+
+| Model | Setup | Metric | vllm-neuron 0.29.0.1.2.0 | COVEX | Change | Status |
+|---|---|---|---|---|---|---|
+| Qwen3-ASR-1.7B (BF16) | trn2.48xlarge, SDK 2.33.1, decoder TP8 + encoder DP8, LibriSpeech, 32 samples | Throughput, concurrency 8 | 136 audio-s/s | 160.7 audio-s/s | **+18.1%** | In review |
+| | | TTFT p50, concurrency 1 / 8 | 0.051 s / – | 0.038 s / – | **−25% / −46%** | |
+| | | E2E latency p50, concurrency 1 / 8 | 0.103 s / – | 0.091 s / – | **−11.6% / −26.6%** | |
+| | | WER | 2.45% | 2.53% | +0.08 pt | |
+
+**In progress (no numbers yet, so not in `main`):**
+- multi-prefill batching ([upstream #124](https://github.com/vllm-project/vllm-neuron/pull/124))
+- KV-cache overcommit with recompute preemption
+- linear bucket steps to cut padding
+- Qwen3-32B BF16 decode MLP NKI kernel
+- Qwen3.5 hybrid support plus weight transfer and sleep/wake for RL rollout ([upstream #98](https://github.com/vllm-project/vllm-neuron/pull/98))
+
+## Branches
+
+| Branch | What it is |
+|---|---|
+| `main` | Upstream plus validated COVEX optimizations. Protected: PR, review and benchmark gate. |
+| `upstream-main` | Exact mirror of `vllm-project/vllm-neuron` `main`, updated nightly. Never commit here. |
+| `feat/*`, `port/*` | Work in progress, behind env flags. |
+| `legacy/runner-sdk` | The earlier COVEX two-line PyTorch/HF to Trainium runner (PyPI `covex-neuron` 0.0.1.dev5). |
+
+---
+
+# Upstream vllm-neuron README
+
 # vLLM Neuron Plugin (Beta)
 
 The vLLM Neuron plugin is the recommended serving solution for large language models on AWS Trainium. It extends [vLLM](https://docs.vllm.ai/) with a Neuron backend, providing the same vLLM APIs and configuration you are already familiar with.

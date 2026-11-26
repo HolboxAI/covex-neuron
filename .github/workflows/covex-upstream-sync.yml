@@ -1,0 +1,53 @@
+name: covex-upstream-sync
+
+# Nightly: mirror vllm-project/vllm-neuron main into upstream-main, then open or
+# update the PR that merges it into main. See CONTRIBUTING-COVEX.md section 4.
+on:
+  schedule:
+    - cron: "0 7 * * *"   # 07:00 UTC daily
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  statuses: write
+
+concurrency:
+  group: covex-upstream-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          # Optional PAT with the workflow scope, needed only when upstream edits .github/workflows.
+          token: ${{ secrets.SYNC_TOKEN || github.token }}
+
+      - name: Mirror upstream main into upstream-main
+        run: |
+          git remote add upstream https://github.com/vllm-project/vllm-neuron.git
+          git fetch --no-tags upstream main
+          git push origin refs/remotes/upstream/main:refs/heads/upstream-main --force
+
+      - name: Open or update the sync PR
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git fetch origin main upstream-main
+          behind=$(git rev-list --count origin/main..origin/upstream-main)
+          echo "main is $behind upstream commits behind"
+          if [ "$behind" = "0" ]; then exit 0; fi
+          sha=$(git rev-parse origin/upstream-main)
+          pr=$(gh pr list --head upstream-main --base main --state open --json number --jq '.[0].number // empty')
+          if [ -z "$pr" ]; then
+            gh pr create --head upstream-main --base main \
+              --title "Sync upstream vllm-neuron ($(date -u +%F))" \
+              --label no-perf-change \
+              --body "Automatic nightly sync of vllm-project/vllm-neuron main ($behind new commits). Merge after a smoke test. If it conflicts, the author of the conflicting COVEX change resolves it (CONTRIBUTING-COVEX.md, section 4)."
+          fi
+          # PRs opened by GITHUB_TOKEN do not trigger other workflows, so report the gate directly.
+          gh api -X POST "repos/${GITHUB_REPOSITORY}/statuses/${sha}" \
+            -f state=success -f context=benchmark-gate -f description="Upstream sync: exempt from the benchmark gate"
