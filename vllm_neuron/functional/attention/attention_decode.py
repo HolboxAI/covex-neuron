@@ -210,6 +210,9 @@ def _torch_compatible_attention_block_tkg_kernel(
     #    attention_mask carries only the active-only portion)
     pos_ids: Tensor = None,
     swa_start_pos_ids: Tensor = None,
+    # COVEX: [1] int32 @ HBM, max prior + active length in the batch. Enables
+    # nkilib dynamic FA early exit (skip 8K FA tiles past the longest context).
+    max_context_len: Tensor = None,
     # -- KV cache update
     update_cache: bool = False,
     kv_cache_update_idx: Tensor = None,
@@ -294,6 +297,7 @@ def _torch_compatible_attention_block_tkg_kernel(
         KVDP_replica_group=None,
         pos_ids=pos_ids,
         swa_start_pos_ids=swa_start_pos_ids,
+        max_context_len=max_context_len,
         S_ctx=None,
     )
 
@@ -1410,6 +1414,9 @@ def attention_decode(
     # -- in-kernel mask generation (fused path)
     pos_ids: Optional[Tensor] = None,
     swa_start_pos_ids: Optional[Tensor] = None,
+    # -- COVEX: dynamic FA early exit (requires pos_ids and block KV; see
+    #    nkilib attention_tkg dynamic_fa_design_spec). [1] int32.
+    max_context_len: Optional[Tensor] = None,
     # -- KV cache update
     update_cache: bool = False,
     # With update_cache=True, also return the UPDATED K/V CACHE tensors.
@@ -1676,6 +1683,7 @@ def attention_decode(
             )
             pos_ids = None
             swa_start_pos_ids = None
+            max_context_len = None
         elif attention_mask is None:
             # DCP gathers Q heads; the owner gate prevents active-token duplication
             # in the CP LSE combine.
@@ -1835,6 +1843,7 @@ def attention_decode(
                 KVDP=attention_dp,
                 pos_ids=pos_ids,
                 swa_start_pos_ids=swa_start_pos_ids,
+                max_context_len=max_context_len if pos_ids is not None else None,
             )
         # The NKI kernel always returns (output, K, V). When update_cache=True
         # the K/V outputs are the in-place-written caches (kept live so the FX

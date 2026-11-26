@@ -25,6 +25,7 @@ from vllm.distributed.parallel_state import get_tp_group
 from transformers import PretrainedConfig
 from vllm.model_executor.models.interfaces import SupportsEagle3
 
+import vllm_neuron.envs as envs
 import vllm_neuron.functional as NF
 from nkilib.core.utils.common_types import NormType
 from vllm_neuron.model.kv_cache import KVSpec, LayerSpec
@@ -439,7 +440,23 @@ class Qwen3Attention(nn.Module):
             .to(self.dtype)
         )
 
-        if attention_mask is None:
+        # COVEX (COVEX_DECODE_DYNAMIC_FA=1): let the kernel build the prior
+        # mask from pos_ids and stop the FA loop after the longest real context
+        # in the batch instead of always walking S_ctx = max_blocks * block_size.
+        # Effective only when S_ctx > 8K (nkilib FA tile) and S_ctx % 8K == 0.
+        dyn_fa_pos_ids = None
+        dyn_fa_max_ctx = None
+        if (
+            envs.COVEX_DECODE_DYNAMIC_FA
+            and attention_mask is None
+            and positions is not None
+            and S_ctx > 8192
+            and S_ctx % 8192 == 0
+        ):
+            pos_bs = positions.view(B, S_decode).to(torch.int32)
+            dyn_fa_pos_ids = pos_bs.to(torch.float32)
+            dyn_fa_max_ctx = (pos_bs[:, 0].max() + S_decode).to(torch.int32).view(1)
+        elif attention_mask is None:
             # Positions are required to construct the causal attention mask.
             assert positions is not None
             pos_ids = positions.view(1, B * S_decode)
@@ -495,6 +512,8 @@ class Qwen3Attention(nn.Module):
                 attention_dp_group=None,
                 attention_dp_rank=0,
                 kv_needs_a2a=False,
+                pos_ids=dyn_fa_pos_ids,
+                max_context_len=dyn_fa_max_ctx,
             )
 
             scatter_new_kv(
@@ -556,6 +575,8 @@ class Qwen3Attention(nn.Module):
             attention_dp_group=None,
             attention_dp_rank=0,
             kv_needs_a2a=False,
+            pos_ids=dyn_fa_pos_ids,
+            max_context_len=dyn_fa_max_ctx,
         )
 
         # Manual KV cache update
