@@ -24,6 +24,8 @@ PARALLELISM SHARDING:
 
 from __future__ import annotations
 
+import logging
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -31,7 +33,8 @@ import torch.nn.functional as F
 import numpy as np
 
 import vllm_neuron.functional as NF
-from nkilib.core.utils.common_types import NormType
+from nkilib.core.utils.common_types import ActFnType, NormType
+from vllm_neuron import envs
 from vllm_neuron.parallel.neuron_parallel_state import (
     get_neuron_encoder_tp_group,
     shard_select,
@@ -46,6 +49,17 @@ from .weight_loader import (
     audio_qkv_bias_loader,
     audio_qkv_weight_loader,
 )
+
+# Route the audio MLP (up -> GELU -> down) through the shared nkilib MLP kernel
+# with ``skip_gate=True`` instead of raw aten matmuls. Gated by
+# ``VLLM_NEURON_ASR_AUDIO_MLP_NKI`` (off by default) because the nkilib
+# skip_gate/GELU kernel path is not yet exercised by a shipping model; keep the
+# raw-matmul fallback until it is hardware-validated for accuracy and latency.
+_AUDIO_MLP_NKI = envs.VLLM_NEURON_ASR_AUDIO_MLP_NKI
+# COVEX: also fold the encoder layer's pre-MLP LayerNorm (norm2, weight + bias) into the same nkilib MLP
+# kernel call (NormType.LAYER_NORM), removing a separate torch LayerNorm + HBM round trip per layer.
+# Requires VLLM_NEURON_ASR_AUDIO_MLP_NKI. Off by default.
+_AUDIO_LN_IN_MLP = _AUDIO_MLP_NKI and envs.COVEX_ASR_ENCODER_LN_IN_MLP
 
 
 @allow_in_graph_cacheable
@@ -181,8 +195,12 @@ class Qwen3ASRAudioMLP(nn.Module):
             ),
         )
 
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        """MLP forward: up → GELU → down → all-reduce → + bias.
+    def forward(
+        self, hidden_states: torch.Tensor, pre_norm: nn.LayerNorm | None = None
+    ) -> torch.Tensor:
+        """MLP forward: [LayerNorm →] up → GELU → down → all-reduce → + bias.
+
+        ``pre_norm`` (COVEX_ASR_ENCODER_LN_IN_MLP) is applied inside the NKI kernel.
 
         Args:
             hidden_states: ``[..., d_model]`` — arbitrary leading dims.
@@ -191,10 +209,57 @@ class Qwen3ASRAudioMLP(nn.Module):
             ``[..., d_model]`` — same leading dims as input.
         """
 
-        up = (
-            hidden_states @ self.up_proj_weight + self.up_proj_bias
-        )  # column-parallel [T, I/tp]
-        output = gelu(up) @ self.down_proj_weight  # row-parallel partials [T, H]
+        if _AUDIO_MLP_NKI and pre_norm is not None and not getattr(Qwen3ASRAudioMLP, "_covex_path_logged", False):
+            # COVEX: NF.mlp falls back to torch silently when the kernel is ineligible. Log the branch once so
+            # an arm measuring the torch path is visible in the server log (grep "COVEX LN-in-MLP").
+            from vllm_neuron.functional.mlp import _can_use_kernel
+
+            logging.getLogger(__name__).warning(
+                "COVEX LN-in-MLP: nkilib kernel path=%s for T=%d H=%d",
+                _can_use_kernel(hidden_states.reshape(-1, self.d_model), self.up_proj_weight,
+                                up_b=self.up_proj_bias.unsqueeze(0)),
+                hidden_states.numel() // self.d_model, self.d_model,
+            )
+            Qwen3ASRAudioMLP._covex_path_logged = True
+
+        if _AUDIO_MLP_NKI:
+            # The nkilib MLP kernel takes a 2D [T, H] activation; the audio
+            # encoder carries [num_blocks, block_size, d_model]. Flatten the
+            # leading block dims for the kernel and restore them after. With
+            # ``skip_gate=True`` the kernel runs ``up -> GELU -> down`` and folds
+            # in the per-rank (sharded) up bias. The replicated down bias stays
+            # outside: it is added after the all-reduce below, exactly as on the
+            # raw-matmul path.
+            out_shape = hidden_states.shape
+            output = NF.mlp(
+                hidden_states.reshape(-1, self.d_model),
+                # gate_w is unused when skip_gate=True; pass up_w so the kernel
+                # eligibility gate reads the correct intermediate dim.
+                self.up_proj_weight,
+                self.up_proj_weight,
+                self.down_proj_weight,
+                skip_gate=True,
+                act_fn=ActFnType.GELU,
+                up_b=self.up_proj_bias.unsqueeze(0),
+                **(
+                    dict(
+                        norm_type=NormType.LAYER_NORM,
+                        ln_w=pre_norm.weight.view(1, -1),
+                        norm_b=pre_norm.bias.view(1, -1),
+                        eps=pre_norm.eps,
+                    )
+                    if pre_norm is not None
+                    else dict(norm_type=NormType.NO_NORM)
+                ),
+            )
+            output = output.reshape(out_shape)
+        else:
+            if pre_norm is not None:
+                hidden_states = pre_norm(hidden_states)
+            up = (
+                hidden_states @ self.up_proj_weight + self.up_proj_bias
+            )  # column-parallel [T, I/tp]
+            output = gelu(up) @ self.down_proj_weight  # row-parallel partials [T, H]
 
         # >>> PARALLELISM: row-parallel down_proj -> reduce partial sums <<<
         # Required whenever the intermediate dim is sharded (world_size > 1).
@@ -427,7 +492,10 @@ class Qwen3ASRAudioEncoderLayer(nn.Module):
             ``[num_blocks, block_size, d_model]``
         """
         hidden_states = hidden_states + self.attn(hidden_states, bound_min, bound_max)
-        hidden_states = hidden_states + self.mlp(self.norm2(hidden_states))
+        if _AUDIO_LN_IN_MLP:
+            hidden_states = hidden_states + self.mlp(hidden_states, pre_norm=self.norm2)
+        else:
+            hidden_states = hidden_states + self.mlp(self.norm2(hidden_states))
 
         # skip fp16 clamp as not needed for bf16
 

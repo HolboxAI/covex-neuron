@@ -47,10 +47,12 @@ if TYPE_CHECKING:
     VLLM_NEURON_MIN_KV_BUDGET_GIB: float = 1.0
     VLLM_NEURON_KV_GMU_BUDGET_CAP_FRACTION: float = 0.30
     # COVEX: decode attention stops after the longest real context in the batch
-    # (nkilib dynamic FA early exit). Off by default; Qwen3 decode only.
+    # (nkilib dynamic FA early exit). Off by default; Qwen3 and Llama 3 decode.
     COVEX_DECODE_DYNAMIC_FA: bool = False
     # COVEX: Qwen3 decode (nkh == 1 path, BF16 KV) writes new K/V inside the attention kernel instead of index_put_.
     COVEX_QWEN3_INKERNEL_KV_WRITE: bool = False
+    # COVEX: fold Qwen3-ASR encoder norm2 (LayerNorm) into the audio MLP NKI kernel. Off by default.
+    COVEX_ASR_ENCODER_LN_IN_MLP: bool = False
     VLLM_NEURON_RESERVED_HEADROOM_GIB: float | None = None
     VLLM_NEURON_WORKER_TERMINATION_TIMEOUT: int = 5
     VLLM_NEURON_NIXL_PROGRESS_THREAD_DELAY_US: int = 0
@@ -82,6 +84,12 @@ if TYPE_CHECKING:
     # composers are the only sequence-parallel decode path, so a refused shape
     # or a disabled flag keeps the all-reduce path.
     VLLM_NEURON_QWEN3_SP_A2A: bool = True
+    # Route the Qwen3-ASR audio-encoder MLP through the shared nkilib NKI MLP
+    # kernel (skip_gate + GELU) instead of raw aten matmuls. OFF by default: the
+    # nkilib skip_gate/GELU kernel path is not yet exercised by a shipping model
+    # (the Qwen3-VL vision tower keeps the raw-matmul path for the same reason),
+    # so it needs a hardware accuracy gate before it can default on.
+    VLLM_NEURON_ASR_AUDIO_MLP_NKI: bool = False
     # Gather the fused sampling tail's rows with ONE all_gather over the 128-rank lm_head TP
     # group, in place of all_gather[TP] followed by all_gather[lm_head_dp].
     VLLM_NEURON_TAIL_FLAT_ROW_GATHER: bool = False
@@ -327,6 +335,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
         else 1.0
     ),
     # Default KV cap for the memory-utilization budget.
+    "COVEX_ASR_ENCODER_LN_IN_MLP": lambda: (
+        maybe_convert_bool(os.getenv("COVEX_ASR_ENCODER_LN_IN_MLP")) or False
+    ),
     "COVEX_DECODE_DYNAMIC_FA": lambda: (
         maybe_convert_bool(os.getenv("COVEX_DECODE_DYNAMIC_FA")) or False
     ),
@@ -442,6 +453,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     "VLLM_NEURON_QWEN3_SP_A2A": lambda: (
         maybe_convert_bool(os.getenv("VLLM_NEURON_QWEN3_SP_A2A")) is not False
+    ),
+    "VLLM_NEURON_ASR_AUDIO_MLP_NKI": lambda: (
+        maybe_convert_bool(os.getenv("VLLM_NEURON_ASR_AUDIO_MLP_NKI")) or False
     ),
     # Gather the fused sampling tail's rows with ONE all_gather over the 128-rank lm_head TP group,
     # in place of all_gather[TP=8] in the giga-kernel followed by all_gather[lm_head_dp=16].

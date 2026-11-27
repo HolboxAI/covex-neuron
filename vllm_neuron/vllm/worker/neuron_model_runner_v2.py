@@ -821,6 +821,7 @@ class NeuronModelRunnerV2:
             self.max_num_batched_tokens,
             configured_buckets=neuron_cfg_dict.get("num_batched_tokens_buckets"),
             use_configured_buckets=user_set_prefill_buckets,
+            default_step=neuron_cfg_dict.get("num_batched_tokens_bucket_step"),
         )
 
         if "num_seqs_buckets" in neuron_cfg_dict:
@@ -828,7 +829,10 @@ class NeuronModelRunnerV2:
                 neuron_cfg_dict["num_seqs_buckets"], self.max_num_reqs
             )
         else:
-            decode_buckets = get_default_num_seqs_buckets(self.max_num_reqs)
+            decode_buckets = get_default_num_seqs_buckets(
+                self.max_num_reqs,
+                step=neuron_cfg_dict.get("num_seqs_bucket_step"),
+            )
 
         # Non-packed FP8 KV splits the two paths on purpose, matching V1:
         # an explicit request raises (unsatisfiable, and the fix is one line),
