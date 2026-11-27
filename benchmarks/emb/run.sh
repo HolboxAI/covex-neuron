@@ -2,7 +2,7 @@
 # Embedding packing sweep: Qwen3-Embedding-8B, TP8 (2 chips) per arm, identical config, all arms at once.
 #   U = pinned upstream (1 prefill/step)  T = fork, 1/step  P4 / P8 / P16 = fork packing N prefills per step
 # Per input length (t64, t256, t1024): one warm pass, then EMB_WINDOWS windows of 256 requests at c32.
-# Correctness: every returned vector vs U (and vs T), cosine >= 0.999 on ALL vectors (min over the set).
+# Correctness: every returned vector vs U (and vs T), cosine >= 0.9999 on ALL vectors (min over the set).
 # Exit 0 only when U, T and every requested P arm are ready, provenance-clean, complete and correct.
 set -uo pipefail
 H=$(cd "$(dirname "$0")" && pwd); F=$H/../five; C=$F/clients.py; D=${EMB_DATA:-$HOME/data/sixdata/embed}
@@ -47,7 +47,7 @@ for t in $LENS; do
   done
   for ref in emb-U emb-T; do for a in $ARMS; do [ $a = $ref ] && continue
     [ -s results/$ref-$t-w1.json ] && [ -s results/$a-$t-w1.json ] || continue
-    EMB_COS_MIN=0.999 python3 $C match results/$ref-$t-w1.json results/$a-$t-w1.json > results/$a.vs.$ref.$t.match.json
+    python3 $C match results/$ref-$t-w1.json results/$a-$t-w1.json > results/$a.vs.$ref.$t.match.json
   done; done
 done
 

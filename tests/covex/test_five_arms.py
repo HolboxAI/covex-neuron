@@ -1010,3 +1010,25 @@ def test_packed_prefill_max_query_len_is_one_value_per_bucket():
     assert f(1, 8, 1, True) == 1 and f(3, 8, 3, True) == 3                         # decode unchanged (incl. spec)
     runner = (ROOT / "vllm_neuron/vllm/worker/neuron_model_runner.py").read_text()
     assert runner.count("canonical_prefill_max_query_len(") == 2, "runtime and warmup must use the same rule"
+
+
+
+def test_decode_step_requires_all_ranks_and_ignores_wrapper_slices():
+    """Astra's repros: a split was printed with 7 of 8 ranks missing, and a depth-1 wrapper spanning the step counted
+    as compute, hiding all exposed all-reduce time."""
+    ds = _ds()
+    def rank(wrapper):
+        z = []
+        for i in range(8):
+            t = 10000 * i; z.append(("decode", t, 1000, 0))
+            if wrapper:
+                z.append(("execution_wrapper", t, 1000, 1))
+            d = 2 if wrapper else 1
+            z += [("matmul", t, 200, d), ("cc_all_reduce", t + 200, 100, d), ("matmul", t + 300, 200, d),
+                  ("cc_all_reduce", t + 500, 100, d)]
+        return z
+    out = ds.analyze({0: rank(False)}, 1)
+    assert "error" in out and "expected 8" in out["error"], out
+    plain = ds.analyze({r: rank(False) for r in range(8)}, 1)
+    wrapped = ds.analyze({r: rank(True) for r in range(8)}, 1)
+    assert plain["exposed_ms"] > 0 and abs(wrapped["exposed_ms"] - plain["exposed_ms"]) < 1e-12, (plain, wrapped)

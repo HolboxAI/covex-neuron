@@ -3,7 +3,7 @@
            [--status STATUS.tsv]
 Per arm and length: seq/s of every window and the median. A ratio vs U (headline) or T (attribution) only when every
 window of both arms served all 256 requests with a positive rate, the arm had no failed run step, and EVERY vector of
-window 1 has cosine >= 0.999 to the reference. Exit 1 if any requested arm's comparison vs U is incomplete."""
+window 1 has cosine >= 0.9999 to the reference. Exit 1 if any requested arm's comparison vs U is incomplete."""
 import os, statistics, sys
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "five"))
 from gate import count_ok, load, match_ok  # noqa: E402

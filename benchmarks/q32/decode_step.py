@@ -62,7 +62,19 @@ def pick_steps(ranks):
     return k, {r: (seqs[r][k][1], seqs[r][k][1] + seqs[r][k][2]) for r in seqs}
 
 
-def analyze(ranks, layers):
+def leaves(v, s, e):
+    """slices inside [s, e) that contain no deeper slice: a wrapper spanning the step is not compute"""
+    inside = [x for x in v if x[3] > 0 and x[1] < e and x[1] + x[2] > s]
+    out = []
+    for n, ts, dur, d in inside:
+        if not any(d2 > d and ts2 >= ts and ts2 + dur2 <= ts + dur for _, ts2, dur2, d2 in inside):
+            out.append((n, ts, dur, d))
+    return out
+
+
+def analyze(ranks, layers, tp=8):
+    if len(ranks) != tp:   # every TP rank, or no communication claim at all
+        return {"error": f"{len(ranks)} rank traces, expected {tp}; communication split unknown"}
     k, win = pick_steps(ranks)
     if k is None:
         return {"error": win}
@@ -70,15 +82,18 @@ def analyze(ranks, layers):
     coll, comp, per_rank_coll = [], [], {}
     for r, v in ranks.items():
         s, e = win[r]
-        for name, ts, dur, depth in v:
-            if depth == 0 or ts + dur <= s or ts >= e:
-                continue
+        for name, ts, dur, depth in leaves(v, s, e):
             iv = (max(ts, s), min(ts + dur, e))
             if COLL.search(name or ""):
                 coll.append(iv); per_rank_coll.setdefault(r, []).append(iv)
             elif not IDLE.search(name or ""):
                 comp.append(iv)
     out = {"step_index": k, "step_ms": (t1 - t0) / 1e6, "ranks": len(ranks)}
+    missing = [r for r in ranks if not per_rank_coll.get(r)]
+    if coll and missing:
+        out.update(exposed_ms="unknown", attn_ms="unknown", mlp_ms="unknown", overlap_ms="unknown",
+                   note=f"ranks {missing} show no collective in the step; split unknown")
+        return out
     if not coll:
         out.update(exposed_ms="unknown", attn_ms="unknown", mlp_ms="unknown", overlap_ms="unknown",
                    note="no slice name matches a collective")
@@ -121,13 +136,14 @@ def fmt(v):
 if __name__ == "__main__":
     a = sys.argv[1:]
     layers = int(a[a.index("--layers") + 1]) if "--layers" in a else 64
+    tp = int(a[a.index("--tp") + 1]) if "--tp" in a else 8
     arms = [x for x in a if "=" in x]
     print("| Arm | Ranks | Step (ms, once across ranks) | Exposed all-reduce wait (ms) | after attention | after MLP | "
           "Comm overlapped with compute (ms) | Note |")
     print("|---|---|---|---|---|---|---|---|")
     for spec in arms:
         arm, d = spec.split("=", 1)
-        r = analyze(load_dir(d), layers)
+        r = analyze(load_dir(d), layers, tp)
         if "error" in r:
             print(f"| {arm} | – | unknown | unknown | unknown | unknown | unknown | {r['error']} |"); continue
         print(f"| {arm} | {r['ranks']} | {fmt(r['step_ms'])} | {fmt(r['exposed_ms'])} | {fmt(r['attn_ms'])} | "
