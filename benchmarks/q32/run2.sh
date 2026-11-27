@@ -137,7 +137,9 @@ for a in $TIMED; do up $a || continue
   [ -n "${SPID[$a]:-}" ] && ! kill -0 "${SPID[$a]}" 2>/dev/null && { unset "UP[$a]"; status $a ready "FAILED died during profile"; }
 done
 # --- timed windows: all timed arms run each window at the same time ------------------------------------------------
-for spec in "c1 1 8 1024 0" "c8 8 32 1024 0" "m5k-c8 8 16 5120 0.2"; do read -r tag c n il rr <<< "$spec"
+# vLLM 0.29 applies a single --random-range-ratio to input AND output lengths (datasets/utils.py _resolve_range_ratios);
+# the JSON form varies only the input, so every request still produces exactly 256 tokens (checked by bench_ok).
+for spec in "c1 1 8 1024 0" "c8 8 32 1024 0" 'm5k-c8 8 16 5120 {"input":0.2,"output":0}'; do read -r tag c n il rr <<< "$spec"
   for w in warm $(seq 1 "$WINDOWS"); do P=()
     if [ -n "${Q32_DEADLINE:-}" ] && [ "$(date +%s)" -ge "$Q32_DEADLINE" ]; then   # leave time to summarize + upload
       status bench "$tag-w$w" "FAILED skipped: run deadline reached"; continue; fi

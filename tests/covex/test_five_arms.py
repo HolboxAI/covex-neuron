@@ -1407,6 +1407,11 @@ def test_run2_stops_at_once_when_u_is_not_ready(tmp_path):
     assert subprocess.run(["pgrep", "-f", "fake_server.py"], capture_output=True).returncode != 0, "servers left running"
 
 
+def test_run2_ranged_workload_varies_input_only():
+    s = (ROOT / "benchmarks/q32/run2.sh").read_text()
+    assert 'm5k-c8 8 16 5120 {"input":0.2,"output":0}' in s, "a bare ratio would also vary output lengths in vLLM 0.29"
+
+
 def test_run2_payload_renders_with_pins_deadline_and_run2(tmp_path):
     out = tmp_path / "p.sh"
     r = subprocess.run(["bash", str(ROOT / "benchmarks/q32/render_payload.sh"), *PINS, str(out), "", "3"],
