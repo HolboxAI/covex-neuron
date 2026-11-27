@@ -9,8 +9,10 @@
 set -uo pipefail
 H=$(cd "$(dirname "$0")/.." && pwd); F=$H/five; A=$H/asr; C=$F/clients.py; D=$HOME/data/sixdata
 export CLIENT_DIR=$HOME/qwen3-asr-inference-cuda-trainium
+# fresh results every attempt: a stale probe output must never reach a verdict
+[ -d results ] && [ -n "$(ls -A results 2>/dev/null)" ] && mv results "results.prev.$(date +%s)"
 mkdir -p results logs; : > REHEARSAL.tsv
-port() { case $1 in q32-T) echo 8000;; q32-C) echo 8001;; asr-T) echo 8002;; asr-C) echo 8003;;
+port() { case $1 in q32-T) echo 8000;; q32-C) echo 8001;; q32-U) echo 8008;; q32-K) echo 8009;; q32-F) echo 8010;; asr-T) echo 8002;; asr-C) echo 8003;;
                     emb-T) echo 8004;; emb-C) echo 8005;; vl-T) echo 8006;; vl-C) echo 8007;; esac; }
 log_of() { case $1 in asr-T) echo "logs/S2-$2-T.server.log";; asr-C) echo "logs/DL-$2-C.server.log";; *) echo "logs/$1-$2.server.log";; esac; }
 NCPU=$(nproc)
@@ -48,7 +50,8 @@ stop() {  # port arm: kill the arm's process tree by PID (no command-line patter
 # ---------------- Track A: CPU mode, small same-architecture checkpoints ----------------
 cpu_probe() {  # arm port
   case $1 in
-    q32-*) timeout 900 python3 $C gen $2 results/$1.cpu.gen.json ;;
+    # same token-id API as the Trainium cache check (return_token_ids), sized for CPU: PROBE_N prompts x PROBE_TOKENS ids, c3
+    q32-*) rm -f results/$1.cpu.gen.json; timeout 900 python3 $C cachecheck $2 results/$1.cpu.gen.json 3 "${PROBE_TOKENS:-8}" ;;
     emb-*) timeout 900 python3 $C emb $2 $D/embed/t256.jsonl 32 32 results/$1.cpu.json ;;   # 32 concurrent -> packed prefills on C
     vl-*)  timeout 900 python3 $C vl $2 $D/vl 4 2 results/$1.cpu.json ;;
     asr-*) ROUNDS=1 SOLO=1 timeout 900 "$A/bench.sh" $1-cpu $2 4 1,4 ;;
@@ -57,10 +60,12 @@ cpu_probe() {  # arm port
 track_a() {
   # CPU decode runs ~1 tok/s: probes check that real requests complete, not speed (4 prompts x 8 tokens, 4 images, 4 clips).
   export VLLM_NEURON_CPU_MODE=1 REHEARSAL_EXTRA="--gpu-memory-utilization 0.2" PROBE_N=4 PROBE_TOKENS=8
+  # per-process provenance (benchmarks/provenance): proves U runs pinned upstream and T/K the fork, before any Trainium
+  export COVEX_PROVENANCE_DIR=$PWD/provenance-cpu ARM_CACHE_BASE=$HOME/arm_cache_cpu; rm -rf "$COVEX_PROVENANCE_DIR"
   # REHEARSAL_PAIRS_A / _B (";"-separated) narrow the arms, e.g. for the CI harness test.
   # No vl-* in CPU mode: vllm-neuron's torch fallback for block-KV attention rejects GQA with 2 KV heads/rank
   # (Qwen3-VL at TP4; rehearsal 1). VL is covered by the compile track; its runtime only on Trainium.
-  IFS=";" read -r -a PAIRS <<< "${REHEARSAL_PAIRS_A:-q32-T q32-C;emb-T emb-C;asr-T asr-C}"
+  IFS=";" read -r -a PAIRS <<< "${REHEARSAL_PAIRS_A:-q32-T q32-K;q32-U q32-C;q32-F}"
   for pair in "${PAIRS[@]}"; do
     i=0; for a in $pair; do serve cpu $a 100 $HOME/models-small "$(cpuset $((i*8)) $((i*8+7)))" & SPID[$a]=$!; i=$((i+1)); done
     for a in $pair; do p=$(( $(port $a) + 100 )); L=$(log_of $a cpu)
@@ -70,36 +75,75 @@ track_a() {
       else record $a cpu FAIL "requests: $(first_err $L)$(tail -1 logs/$a.cpu.probe.log | cut -c1-120)"; fi
       stop $p $a
     done
-    case "$pair" in q32*) [ -s results/q32-T.cpu.gen.json ] && [ -s results/q32-C.cpu.gen.json ] && python3 $C match results/q32-T.cpu.gen.json results/q32-C.cpu.gen.json > results/q32.cpu.match.json 2>&1 ;; esac
+  done
+  # provenance verdict for the q32 arms that ran (U against UPSTREAM_DIR, the rest against this checkout)
+  exp=(); for a in q32-U q32-T q32-K q32-C q32-F; do [[ " ${PAIRS[*]} " == *"$a"* ]] || continue
+    [ $a = q32-U ] && exp+=("$a=${UPSTREAM_DIR:-/nonexistent}") || exp+=("$a=${FORK_DIR:-$(cd "$H/.." && pwd)}"); done
+  if [ ${#exp[@]} -gt 0 ]; then
+    python3 "$H/provenance/verify.py" "$COVEX_PROVENANCE_DIR" "${REHEARSAL_MIN_PROCS:-9}" "${exp[@]}" > results/provenance-cpu.tsv
+    while IFS=$'\t' read -r a st why; do record "$a" provenance "$st" "$why"; done < results/provenance-cpu.tsv
+  fi
+  unset COVEX_PROVENANCE_DIR
+  # greedy agreement with the stock fork arm, from THIS attempt's probes: exact count, non-empty, identical
+  for a in q32-K q32-U q32-C q32-F; do
+    [[ " ${PAIRS[*]} " == *"$a"* ]] || continue
+    if [ -s results/q32-T.cpu.gen.json ] && [ -s results/$a.cpu.gen.json ]; then
+      m=$(python3 $C match results/q32-T.cpu.gen.json results/$a.cpu.gen.json 2>&1)
+      v=$(python3 -c 'import json,sys; d=json.loads(sys.argv[1]); n=int(sys.argv[2]); print("PASS" if d.get("pass") and d.get("n")==n else "FAIL")' "$m" "${PROBE_N:-4}" 2>/dev/null || echo FAIL)
+      record $a cpu-match "$v" "vs q32-T: $m (expect n=${PROBE_N:-4})"
+    else record $a cpu-match FAIL "missing probe output (q32-T or $a)"; fi
   done
 }
 
 # ---------------- Track B: CPU compile for trn2, real checkpoints ----------------
 track_b() {
   unset VLLM_NEURON_CPU_MODE REHEARSAL_EXTRA
+  # per-arm compile caches (serve.sh ARM_CACHE_BASE): U and T compile identical graphs and must not share NEFFs
   export VLLM_NEURON_CPU_COMPILE=1 NEURON_PLATFORM_TARGET_OVERRIDE=trn2 NEURON_LOGICAL_NC_CONFIG=2 \
-         NEURON_LIBTORCH_REMOTE_CACHE=$HOME/neff_cache NEURON_LIBTORCH_PARALLEL_COMPILE_WORKERS=8
+         ARM_CACHE_BASE=$HOME/neff_cache NEURON_LIBTORCH_PARALLEL_COMPILE_WORKERS=8
   mkdir -p $HOME/neff_cache
   # asr-T/asr-C/emb-T already compiled and served on Trainium (2026-11-27); spend the time on the arms that never did.
-  IFS=";" read -r -a PAIRS <<< "${REHEARSAL_PAIRS_B:-q32-C q32-T;vl-C vl-T;emb-C}"
+  IFS=";" read -r -a PAIRS <<< "${REHEARSAL_PAIRS_B:-q32-K q32-T;q32-U q32-C;q32-F}"
   for pair in "${PAIRS[@]}"; do
     for a in $pair; do need $a || { record $a compile FAIL "checkpoint not downloaded"; continue 2; }; done
-    i=0; for a in $pair; do serve compile $a 200 $HOME/models "$(cpuset $((16+i*24)) $((16+i*24+23)))" & SPID[$a]=$!; i=$((i+1)); done
+    i=0; for a in $pair; do
+      : > "$(log_of "$a" compile)"  # a launcher that dies before exec must leave no evidence from an earlier attempt
+      serve compile $a 200 $HOME/models "$(cpuset $((16+i*24)) $((16+i*24+23)))" & SPID[$a]=$!; i=$((i+1))
+    done
     for a in $pair; do p=$(( $(port $a) + 200 )); L=$(log_of $a compile)
-      wait_up $a $p 1800; rc=$?
+      exit_rc=0; wait_up $a $p 1800; rc=$?
+      if [ "$rc" = 1 ]; then
+        wait "${SPID[$a]}"; exit_rc=$?
+        unset 'SPID[$a]'  # the child has been reaped
+      fi
       bad=$(grep -m1 -oE "NCC_E[A-Z]+[0-9]+[^.]*" "$L" | cut -c1-200)
       # PASS needs positive evidence of compilation in the log, never just the absence of errors.
       ngraphs=$(grep -cE "Extracting graphs for" "$L" 2>/dev/null); ngraphs=${ngraphs:-0}
       if [ ! -s "$L" ] || [ "$ngraphs" = 0 ]; then record $a compile FAIL "no compile output ($([ -s "$L" ] && echo 'log has no graph extraction' || echo 'empty log')): $(first_err $L)"
+      elif [ "$rc" = 1 ] && [ "$exit_rc" != 0 ]; then record $a compile FAIL "launcher exited $exit_rc: ${bad:-$(first_err "$L")}"
+      elif [ "$rc" = 2 ]; then record $a compile FAIL "not done in 30 min: ${bad:-$(first_err "$L")}"
+      elif ! grep -qF "Model warmup completed:" "$L"; then record $a compile FAIL "no post-compilation completion marker: ${bad:-$(first_err "$L")}"
       elif [ $rc = 0 ] && [ -z "$bad" ]; then record $a compile PASS "compiled, server up"
       elif [ $rc = 1 ] && [ -z "$bad" ] && ! grep -qE "Traceback|Error:" "$L"; then record $a compile PASS "compiled, exited clean"
-      else record $a compile FAIL "${bad:-$( [ $rc = 2 ] && echo 'not done in 30 min: ' )$(first_err $L)}"; fi
-      # every graph must alias every layer's K/V cache (count checked per lane against num_hidden_layers);
-      # 6 lanes = 2 prefill + 4 decode buckets in serve.sh. The squeeze-view bug left decode lanes with 1.
-      if [[ $a == q32-* ]]; then
-        res=$(python3 "$H/rehearsal/alias_check.py" "$L" "$HOME/models/Qwen3-32B/config.json" 6 2>&1); res=${res:-"FAIL	alias_check produced no output"}
-        [[ $res == PASS* ]] && st=PASS || st=FAIL; record $a compile-alias $st "${res#*	}"; fi
+      else record $a compile FAIL "${bad:-$(first_err "$L")}"; fi
       stop $p $a
+    done
+    # KV aliasing on every lane x rank (alias_check.py). q32-T is the stock reference (upstream code path, flags off):
+    # its structure is checked; every other q32 arm (U, K, F, C) must match its mutated-input list lane by lane.
+    cfgj=$HOME/models/Qwen3-32B/config.json; LT=$(log_of q32-T compile)
+    if [[ " $pair " == *" q32-T "* ]]; then
+      res=$(python3 "$H/rehearsal/alias_check.py" "$LT" "$cfgj" 6 8 2>&1)
+      # the reference row reports structure only; it is not promoted to PASS on identity grounds
+      case "${res%%	*}" in FAIL) st=FAIL;; UNVERIFIED) st=PASS; res="x	reference structure OK (counts, all lanes x ranks consistent): ${res#*	}";; *) st=FAIL; res="x	alias_check error: $res";; esac
+      record q32-T compile-alias $st "${res#*	}"
+      record q32-T kv-identity UNVERIFIED "compile log has parameter ordinals only; named K/V bindings not available"
+    fi
+    for a in $pair; do [[ $a == q32-* && $a != q32-T ]] || continue
+      if [ -s "$LT" ]; then res=$(python3 "$H/rehearsal/alias_check.py" "$(log_of $a compile)" "$cfgj" 6 8 --ref "$LT" 2>&1)
+      else res=$(python3 "$H/rehearsal/alias_check.py" "$(log_of $a compile)" "$cfgj" 6 8 2>&1); fi
+      case "${res%%	*}" in PASS|FAIL|UNVERIFIED) st=${res%%	*};; *) st=FAIL; res="x	alias_check error: $res";; esac
+      record $a compile-alias $st "${res#*	}"
+      record $a kv-identity UNVERIFIED "structural parity only; named K/V bindings not in the compile log"
     done
   done
 }
@@ -112,6 +156,18 @@ wait $TA $TB
   sed -E 's/\|/\//g; s/\t/ | /g; s/^/| /; s/$/ |/' REHEARSAL.tsv
   echo; echo "Track cpu: CPU mode, small same-architecture checkpoints, real requests (kernels run as PyTorch reference)."
   echo "Track compile: CPU compile for trn2, real checkpoints, real neuronx-cc, no execution."
-  [ -f results/q32.cpu.match.json ] && { echo; echo "q32 T vs C greedy match (CPU mode): $(cat results/q32.cpu.match.json)"; }
 } > REHEARSAL.md
+# Overall: every REQUIRED row must exist and PASS. Known-broken arms keep their detailed rows but are not required.
+REQUIRED=${REHEARSAL_REQUIRED:-"q32-T:cpu q32-K:cpu q32-U:cpu q32-T:provenance q32-K:provenance q32-U:provenance q32-K:cpu-match q32-U:cpu-match q32-T:compile q32-K:compile q32-U:compile q32-T:compile-alias q32-K:compile-alias q32-U:compile-alias"}
+# a scheduled arm is a required arm: F (dynamic FA, exploratory) must run, pass provenance and compile; only its token
+# agreement stays informational (dynamic FA may legitimately change greedy tokens)
+if [[ " ${REHEARSAL_PAIRS_A:-q32-F} ${REHEARSAL_PAIRS_B:-q32-F} " == *q32-F* ]] && [ -z "${REHEARSAL_REQUIRED_SET:-}" ]; then
+  REQUIRED="$REQUIRED q32-F:cpu q32-F:provenance q32-F:compile q32-F:compile-alias"; fi
+overall=0
+for r in $REQUIRED; do
+  st=$(awk -F'\t' -v a="${r%%:*}" -v t="${r#*:}" '$1==a && $2==t {print $3}' REHEARSAL.tsv | tail -1)
+  [ "$st" = PASS ] || { echo "REQUIRED $r: ${st:-MISSING (incomplete)}" | tee -a REHEARSAL.md; overall=1; }
+done
+echo "OVERALL $([ $overall = 0 ] && echo PASS || echo FAIL)" | tee -a REHEARSAL.md
 cat REHEARSAL.md
+exit $overall

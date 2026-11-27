@@ -3,6 +3,9 @@
 # Core ranges are fixed per arm so all arms share one trn2.48xlarge (16 chips = 64 logical cores at LNC2).
 set -euo pipefail
 ARM=$1; PORT=$2; M=${MODELS_DIR:-$HOME/models}; TAG=${LOG_TAG:-}
+# Inherited COVEX flags never leak into an arm: each arm sets exactly its own below.
+for v in $(env | grep -oE '^COVEX_[A-Z0-9_]+' | grep -vE '^COVEX_(PROVENANCE_DIR|ARM)$'); do unset "$v"; done
+VLLM=(vllm)   # the fork arms; q32-U runs the upstream venv's interpreter (UPSTREAM_PY), see the q32 case
 # REHEARSAL_EXTRA: extra vllm args for the CPU-mode rehearsal only (never set on Trainium).
 read -r -a REH_ARGS <<< "${REHEARSAL_EXTRA:-}"   # own name: arms use $EXTRA for config fragments
 export TORCH_DEVICE_BACKEND_AUTOLOAD=0 NEURON_LIBTORCH_COMPILATION_TIMEOUT=3600 NEURON_SKIP_EFA_AFFINITY=1
@@ -10,10 +13,20 @@ export VLLM_NEURON_COMPILATION_TIMEOUT=3600 VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=1
 mkdir -p logs
 [ "${DRYRUN:-0}" = 1 ] && cd "$(mktemp -d)"
 case "$ARM" in
-  q32-T|q32-C)  # Qwen3-32B, TP8, 32K context, cap 0.5 (tuned stock); C = dynamic FA + in-kernel KV write
+  q32-U|q32-T|q32-K|q32-F|q32-C)  # Qwen3-32B, TP8, 32K context, cap 0.5, identical config in every arm:
+    #   U = pinned upstream vllm-neuron in its own venv (UPSTREAM_PY); provenance checked per process by q32/run.sh
+    #   T = this fork, flags off   K = in-kernel KV write only   F = dynamic FA only   C = both
     # cap 0.8 failed to load (2026-11-27): 7.64 GiB weights/core + 13.4 GiB KV left < 3 GiB for NEFFs. 0.5 -> 10.8 GiB KV,
     # enough for 8 seqs x 32K (8.6 GiB), ~5.5 GiB headroom. Checked by tests/covex/test_five_arms.py::test_hbm_budget.
-    [ "$ARM" = q32-T ] && CORES=0-7 || { CORES=8-15; export COVEX_DECODE_DYNAMIC_FA=1 COVEX_QWEN3_INKERNEL_KV_WRITE=1; }
+    case $ARM in
+      # U: its own venv (a copy of the DLAMI venv with only pinned upstream installed); launched by absolute
+      # interpreter from an empty working directory, so neither cwd nor the fork's install can supply vllm_neuron.
+      q32-U) CORES=${Q32_CORES:-0-7}; VLLM=("${UPSTREAM_PY:?UPSTREAM_PY (upstream venv python) required}" -m vllm.entrypoints.cli.main) ;;
+      q32-T) CORES=${Q32_CORES:-0-7} ;;
+      q32-K) CORES=${Q32_CORES:-8-15}; export COVEX_QWEN3_INKERNEL_KV_WRITE=1 ;;
+      q32-F) CORES=${Q32_CORES:-8-15}; export COVEX_DECODE_DYNAMIC_FA=1 ;;
+      q32-C) CORES=${Q32_CORES:-8-15}; export COVEX_DECODE_DYNAMIC_FA=1 COVEX_QWEN3_INKERNEL_KV_WRITE=1 ;;
+    esac
     export VLLM_NEURON_KV_GMU_BUDGET_CAP_FRACTION=0.5
     ARGS=("$M/Qwen3-32B" --served-model-name m --dtype bfloat16 --tensor-parallel-size 8 --max-model-len 32768
           --max-num-batched-tokens 8192 --max-num-seqs 8 --no-enable-prefix-caching
@@ -50,8 +63,17 @@ if [ "${PROFILE:-0}" = 1 ]; then   # vllm-neuron built-in profiler; records only
   PROF=(--profiler-config '{"profiler": "cuda"}')
 fi
 python3 -c 'import json,sys; json.loads(sys.argv[1])' "$CFG" || { echo "bad CFG for $ARM" >&2; exit 2; }
+export COVEX_ARM=$ARM
+if [ -n "${COVEX_PROVENANCE_DIR:-}" ]; then   # per-process record of where vllm_neuron is imported from
+  export PYTHONPATH="$(cd "$(dirname "$0")/../provenance" && pwd)${PYTHONPATH:+:$PYTHONPATH}"; fi
+if [ -n "${ARM_CACHE_BASE:-}" ]; then          # each arm its own compile cache: no arm can run another's NEFFs
+  unset NEURON_LIBTORCH_REMOTE_CACHE           # a shared remote cache would bypass the per-arm roots
+  export NEURON_LIBTORCH_CACHE_ROOT=$ARM_CACHE_BASE/$ARM VLLM_CACHE_ROOT=$ARM_CACHE_BASE/$ARM/vllm \
+         TORCH_NEURONX_NEFF_CACHE_DIR=$ARM_CACHE_BASE/$ARM/neff; fi
 if [ "${DRYRUN:-0}" = 1 ]; then
-  echo "$ARM cores=$CORES flags=$(env | grep -oE '^COVEX_[A-Z_]+' | sort | tr '\n' ' ')cfg=$CFG"
-  printf 'argv:'; printf ' %q' vllm serve "${ARGS[@]}" ${REH_ARGS[@]+"${REH_ARGS[@]}"} --additional-config "$CFG" ${PROF[@]+"${PROF[@]}"} --port "$PORT"; echo; exit 0; fi
-{ echo "arm=$ARM cores=$CORES profile=${PROFILE:-0}"; env | grep -E '^(COVEX|VLLM_NEURON|NEURON_VISIBLE)' | sort; printf '%q ' "${ARGS[@]}"; echo; echo "$CFG"; } > "logs/$ARM$TAG.meta"
-exec vllm serve "${ARGS[@]}" ${REH_ARGS[@]+"${REH_ARGS[@]}"} --additional-config "$CFG" ${PROF[@]+"${PROF[@]}"} --port "$PORT" > "logs/$ARM$TAG.server.log" 2>&1
+  echo "$ARM cores=$CORES flags=$(env | grep -oE '^COVEX_[A-Z_]+' | grep -vxE 'COVEX_(ARM|PROVENANCE_DIR)' | sort | tr '\n' ' ')cfg=$CFG"
+  printf 'argv:'; printf ' %q' "${VLLM[@]}" serve "${ARGS[@]}" ${REH_ARGS[@]+"${REH_ARGS[@]}"} --additional-config "$CFG" ${PROF[@]+"${PROF[@]}"} --port "$PORT"; echo; exit 0; fi
+LOGS=$PWD/logs
+{ echo "arm=$ARM cores=$CORES profile=${PROFILE:-0} launcher=${VLLM[*]}"; env | grep -E '^(COVEX|VLLM_NEURON|NEURON_VISIBLE|NEURON_LIBTORCH_CACHE_ROOT|VLLM_CACHE_ROOT)' | sort; printf '%q ' "${ARGS[@]}"; echo; echo "$CFG"; } > "$LOGS/$ARM$TAG.meta"
+cd "$(mktemp -d)"   # empty working directory: `python -m` would otherwise put a source checkout first on sys.path
+exec "${VLLM[@]}" serve "${ARGS[@]}" ${REH_ARGS[@]+"${REH_ARGS[@]}"} --additional-config "$CFG" ${PROF[@]+"${PROF[@]}"} --port "$PORT" > "$LOGS/$ARM$TAG.server.log" 2>&1

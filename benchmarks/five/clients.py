@@ -4,6 +4,7 @@
   vl    <port> <vl_dir> <n> <conc> <out.json>        image chat throughput (+ first 20 answers)
   gen   <port> <out.json>                            20 fixed greedy prompts, 64 tokens (T/C output match)
   smoke <gen|emb|vl|asr> <port> [model] [data]   one real request; non-zero exit unless usable (readiness gate)
+  cachecheck <port> <out.json> [conc] [gen_tokens]  exact-length token-id prompts across cache/bucket/tile boundaries
   match <T.json> <C.json>                            compare saved outputs: exact-text match rate, or embedding cosine
 """
 import asyncio, base64, json, os, statistics, sys, time
@@ -62,16 +63,64 @@ def gen(port, out):
     wall, lat, outs = asyncio.run(run_pool(n, 4, make))
     json.dump({"answers": [outs[i]["choices"][0]["text"] for i in range(n)]}, open(out, "w"))
 
+# Exact prompt lengths (token ids, no tokenizer) around KV-cache block, prefill bucket and FA-tile boundaries. 8190 + 32
+# generated tokens crosses 8192 during decode (the dynamic-FA threshold). Ids 1000..19999: ordinary BPE tokens.
+CACHE_LENGTHS = [1, 31, 32, 33, 127, 128, 129, 511, 512, 513, 1023, 1024, 1025, 2049, 4095, 4096, 4097, 8190]
+
+
+def cachecheck(port, out, conc="1", gen_tokens="32"):
+    """Greedy output TOKEN IDS for exact-length prompts (return_token_ids -> choices[0].token_ids), so two arms that
+    decode to the same text through different ids still differ. conc 3 pads decode batches to the 4-bucket.
+    Fails loudly unless every prompt returns exactly gen_tokens ids."""
+    import random
+    rng = random.Random(0)
+    prompts = [[rng.randrange(1000, 20000) for _ in range(n)] for n in CACHE_LENGTHS]
+    g = int(gen_tokens)
+    make = lambda c, i: c.post(f"http://127.0.0.1:{port}/v1/completions",
+                               json={"model": "m", "prompt": prompts[i], "max_tokens": g, "temperature": 0,
+                                     "ignore_eos": True, "return_token_ids": True})
+    n = min(PROBE_N or len(prompts), len(prompts))
+    wall, lat, outs = asyncio.run(run_pool(n, int(conc), make))
+    ids = []
+    for i in range(n):
+        ch = outs[i]["choices"][0]
+        t, pt = ch.get("token_ids"), ch.get("prompt_token_ids", outs[i].get("prompt_token_ids"))
+        if not isinstance(t, list) or len(t) != g or not all(isinstance(x, int) for x in t):
+            raise SystemExit(f"cachecheck: prompt {i} (len {CACHE_LENGTHS[i]}) returned {t!r:.80} - expected {g} token ids")
+        if pt != prompts[i]:   # the server must have seen exactly the deterministic prompt (length and ids)
+            raise SystemExit(f"cachecheck: prompt {i}: server prompt_token_ids differ from the sent {CACHE_LENGTHS[i]} ids "
+                             f"(got {len(pt) if isinstance(pt, list) else pt!r})")
+        ids.append(t)
+    import hashlib
+    digest = hashlib.sha256(json.dumps(prompts[:n]).encode()).hexdigest()
+    json.dump({"lengths": CACHE_LENGTHS[:n], "concurrency": int(conc), "gen_tokens": g, "prompt_sha256": digest,
+               "token_ids": ids}, open(out, "w"))
+
+
 def match(a, b):
     A, B = json.load(open(a)), json.load(open(b))
     if "vectors" in A:
         import math
         cos = [sum(x * y for x, y in zip(u, v)) / (math.sqrt(sum(x * x for x in u)) * math.sqrt(sum(y * y for y in v)))
                for u, v in zip(A["vectors"], B["vectors"])]
-        print(json.dumps({"min_cosine": round(min(cos), 6), "pass": min(cos) >= 0.9999}))
+        ok = len(A["vectors"]) == len(B["vectors"]) > 0 and min(cos) >= 0.9999
+        print(json.dumps({"min_cosine": round(min(cos), 6) if cos else None, "n": len(cos), "pass": ok}))
+    elif "token_ids" in A or "token_ids" in B:
+        # exact token-id agreement; both sides must hold every prompt with exactly gen_tokens ids
+        a_, b_, g = A.get("token_ids", []), B.get("token_ids", []), A.get("gen_tokens")
+        full = lambda L: len(L) > 0 and all(isinstance(x, list) and len(x) == g for x in L)
+        same = sum(x == y for x, y in zip(a_, b_))
+        ok = (len(a_) == len(b_) and full(a_) and full(b_) and g == B.get("gen_tokens") and
+              A.get("lengths") == B.get("lengths") and A.get("prompt_sha256") == B.get("prompt_sha256") and same == len(a_))
+        first = next(([i, next(j for j, (p, q) in enumerate(zip(x, y)) if p != q)] for i, (x, y) in enumerate(zip(a_, b_))
+                      if x != y), None)   # [prompt, first differing generated position]
+        print(json.dumps({"exact_match": f"{same}/{len(a_)}", "n": len(a_), "gen_tokens": g, "first_diff": first, "pass": ok}))
     else:
-        same = sum(x == y for x, y in zip(A["answers"], B["answers"]))
-        print(json.dumps({"exact_match": f"{same}/{len(A['answers'])}", "pass": same == len(A["answers"])}))
+        a_, b_ = A.get("answers", []), B.get("answers", [])
+        same = sum(x == y for x, y in zip(a_, b_))
+        # Pass only on equal, non-empty answer lists with every answer non-empty (0/0 must not count as a match).
+        ok = len(a_) == len(b_) > 0 and all(isinstance(x, str) and x.strip() for x in a_ + b_) and same == len(a_)
+        print(json.dumps({"exact_match": f"{same}/{len(a_)}", "n": len(a_), "pass": ok}))
 
 def smoke(kind, port, model="m", data=""):
     """One small real request; exits non-zero unless it returns a usable result. The readiness gate after /health."""
@@ -104,4 +153,4 @@ def smoke(kind, port, model="m", data=""):
 if __name__ == "__main__":
     cmd, *a = sys.argv[1:]
     {"emb": lambda: emb(a[0], a[1], int(a[2]), int(a[3]), a[4]), "vl": lambda: vl(a[0], a[1], int(a[2]), int(a[3]), a[4]),
-     "gen": lambda: gen(a[0], a[1]), "match": lambda: match(a[0], a[1]), "smoke": lambda: smoke(*a)}[cmd]()
+     "gen": lambda: gen(a[0], a[1]), "match": lambda: match(a[0], a[1]), "smoke": lambda: smoke(*a), "cachecheck": lambda: cachecheck(*a)}[cmd]()

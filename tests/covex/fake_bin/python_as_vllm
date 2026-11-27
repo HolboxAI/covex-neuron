@@ -1,0 +1,4 @@
+#!/bin/bash
+# Fake venv interpreter for harness tests: "<python> -m vllm.entrypoints.cli.main serve ..." -> fake `vllm serve ...`.
+[ "$1" = -m ] && shift 2
+exec "$(dirname "$0")/vllm" "$@"

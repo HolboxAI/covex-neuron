@@ -6,7 +6,7 @@ mkdir -p /home/ubuntu/run && chown ubuntu /home/ubuntu/run
 ( while true; do aws s3 sync /home/ubuntu/run s3://$B/$P/ --region $R --only-show-errors --exclude "profiles/*/*.ntff"; aws s3 cp /var/log/covex-run.log s3://$B/$P/run.log --region $R --only-show-errors; sleep 90; done ) &
 sudo -iu ubuntu bash <<'EOS'
 set -x
-B=covex-neuron-runs-992382417943; R=us-east-2
+B=covex-neuron-runs-992382417943; R=us-east-2; P=five-model   # defined here too: the inner shell does not see the outer P
 source "$(ls -d /opt/aws_neuronx_venv_pytorch_inference_vllm_0_29_0_1_2_0)/bin/activate"
 pip freeze > ~/run/pip_freeze.txt
 cd ~ && git clone -q -b exp/six-model https://github.com/HolboxAI/covex-neuron && cd covex-neuron && git rev-parse HEAD > ~/run/covex_commit.txt
@@ -24,8 +24,9 @@ hf download Qwen/Qwen3-ASR-1.7B --local-dir ~/models/Qwen3-ASR-1.7B > /dev/null 
 wait
 for m in Qwen3-32B Qwen3-Embedding-8B Qwen3-VL-32B-Instruct gpt-oss-20b Qwen3-ASR-1.7B; do ls ~/models/$m/config.json || echo "MODEL $m MISSING"; done
 du -sh ~/models/*
-cd ~/run && bash ~/covex-neuron/benchmarks/five/run.sh
+cd ~/run && bash ~/covex-neuron/benchmarks/five/run.sh; rc=$?; echo "RUN_EXIT=$rc" | tee ~/run/STATUS
 aws s3 sync /var/tmp/neuron-compile-cache s3://$B/compile-cache/five-model/ --region $R --only-show-errors || true
-echo ALLDONE
+aws s3 sync ~/run s3://$B/$P/ --region $R --only-show-errors || true
+echo "ALLDONE RUN_EXIT=$(cat ~/run/STATUS 2>/dev/null)"
 EOS
 sleep 120; sudo shutdown -h now

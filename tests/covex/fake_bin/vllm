@@ -1,16 +1,56 @@
 #!/usr/bin/env bash
-# Fake `vllm serve` for harness tests. Starts late (the gap that made rehearsal 1 kill starting servers), prints the
-# compile evidence rehearse.sh checks (6 lanes, 1 + 2*FAKE_LAYERS mutated inputs; ports in FAKE_ALIAS_BUG_PORTS get
-# the squeeze-view bug: decode lanes 2-5 with only [1]), then serves.
-port=""; while [ $# -gt 0 ]; do [ "$1" = --port ] && port=$2; shift; done
+# Fake `vllm` for harness tests.
+#  serve: starts late (the gap that made rehearsal 1 kill starting servers); in CPU-compile mode prints the evidence
+#   rehearse.sh checks (6 lanes x 8 ranks, 1 + 2*FAKE_LAYERS mutated inputs; FAKE_ALIAS_BUG_PORTS -> decode lanes [1];
+#   FAKE_EXIT_AFTER_EXTRACTION_PORTS / FAKE_FAILED_LAUNCHER_PORTS -> interrupted compile / launcher exit 137); then
+#   serves fake_server.py, which writes profile files to the configured neuron_profiler output_dir on /stop_profile.
+#  bench serve: writes a vllm-bench-style result; FAKE_BENCH_FAIL_PORTS -> exit 1 with no result;
+#   FAKE_BENCH_COMPLETED="<port>:<n>" -> a valid result with only n completed. Output tok/s = port-dependent.
+if [ "${1:-}" = bench ]; then
+  exec python3 - "$@" <<'PY'
+import json, os, re, sys
+a = sys.argv[1:]
+v = lambda k: a[a.index(k) + 1]
+port = re.search(r":(\d+)$", v("--base-url")).group(1); n = int(v("--num-prompts")); out = int(v("--random-output-len"))
+if port in os.environ.get("FAKE_BENCH_FAIL_PORTS", "").split():
+    sys.exit("fake bench failure")
+done = n
+for spec in os.environ.get("FAKE_BENCH_COMPLETED", "").split():
+    p, k = spec.split(":")
+    if p == port:
+        done = int(k)
+tps = 100.0 * (1 + int(port) % 2)   # T (even port) 100 tok/s, C (odd port) 200 tok/s
+os.makedirs(v("--result-dir"), exist_ok=True)
+inl = int(v("--random-input-len"))
+json.dump({"num_prompts": n, "completed": done, "failed": n - done, "total_output_tokens": done * out,
+           "total_input_tokens": n * inl,
+           "output_throughput": tps, "median_tpot_ms": 1000.0 / tps, "median_ttft_ms": 50.0},
+          open(os.path.join(v("--result-dir"), v("--result-filename")), "w"))
+PY
+fi
+port=""; cfg=""; while [ $# -gt 0 ]; do [ "$1" = --port ] && port=$2; [ "$1" = --additional-config ] && cfg=$2; shift; done
 echo "INFO fake vllm serve on port $port (cpu_mode=${VLLM_NEURON_CPU_MODE:-0})"
+# vLLM-style process prefixes; the fake is one process, so every role carries the server's PID (exec keeps it).
+echo "(EngineCore pid=$$) INFO fake engine"
+for r in 0 1 2 3 4 5 6 7; do
+  [[ " ${FAKE_DROP_TP_PORTS:-} " == *" $port "* ]] && [ $r = 5 ] && continue
+  echo "(Worker_TP$r pid=$$) INFO fake worker"; done
 sleep "${FAKE_VLLM_DELAY:-3}"
 if [ "${VLLM_NEURON_CPU_COMPILE:-0}" = 1 ]; then
   echo "INFO - neuron_worker.py:2199 - Extracting graphs for 2 prefill buckets: [(1024, 8192), (8192, 8192)]"
   full=$(python3 -c "print(', '.join(['1'] + [str(13 + i) for i in range(2 * ${FAKE_LAYERS:-2})]))")
-  for l in 0 1 2 3 4 5; do
+  for l in 0 1 2 3 4 5; do for r in 0 1 2 3 4 5 6 7; do   # 6 lanes x TP8 ranks, like the real compile log
     m=$full; [[ " ${FAKE_ALIAS_BUG_PORTS:-} " == *" $port "* ]] && [ $l -ge 2 ] && m=1
-    echo "INFO - aliasing_analysis.py:745 - [trace lane=$l rank=0] Mutated inputs: [$m], Explicit outputs: 1"
-  done
+    [[ " ${FAKE_DROP_RANK_PORTS:-} " == *" $port "* ]] && [ $l = 3 ] && [ $r = 5 ] && continue   # one TP rank never logs
+    echo "INFO - aliasing_analysis.py:745 - [trace lane=$l rank=$r] Mutated inputs: [$m], Explicit outputs: 1"
+  done; done
+  # Test both an interrupted compile and a failed launcher after the completion marker.
+  [[ " ${FAKE_EXIT_AFTER_EXTRACTION_PORTS:-} " == *" $port "* ]] && exit 0
+  echo "INFO - neuron_worker.py - Model warmup completed: 2 num_batched_tokens_buckets, 4 num_seqs_buckets"
+  [[ " ${FAKE_FAILED_LAUNCHER_PORTS:-} " == *" $port "* ]] && exit 137
 fi
+# a real compile leaves NEFFs in the arm's cache root
+[ -n "${NEURON_LIBTORCH_CACHE_ROOT:-}" ] && [[ " ${FAKE_NO_NEFF_PORTS:-} " != *" $port "* ]] && \
+  { mkdir -p "$NEURON_LIBTORCH_CACHE_ROOT" && echo fake > "$NEURON_LIBTORCH_CACHE_ROOT/graph.neff"; }
+export FAKE_PROFILE_DIR=$(python3 -c 'import json,sys; c=json.loads(sys.argv[1] or "{}"); print(c.get("neuron_profiler",{}).get("output_dir",""))' "$cfg" 2>/dev/null)
 exec python3 "$(dirname "$0")/../fake_server.py" --port "$port"   # real vllm carries --port too

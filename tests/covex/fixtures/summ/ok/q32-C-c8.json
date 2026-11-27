@@ -1,0 +1,1 @@
+{"num_prompts": 32, "completed": 32, "failed": 0, "total_output_tokens": 8192, "output_throughput": 200.0, "median_tpot_ms": 5.0, "median_ttft_ms": 50.0, "total_input_tokens": 32768}
