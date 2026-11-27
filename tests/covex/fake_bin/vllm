@@ -4,38 +4,69 @@
 #   rehearse.sh checks (6 lanes x 8 ranks, 1 + 2*FAKE_LAYERS mutated inputs; FAKE_ALIAS_BUG_PORTS -> decode lanes [1];
 #   FAKE_EXIT_AFTER_EXTRACTION_PORTS / FAKE_FAILED_LAUNCHER_PORTS -> interrupted compile / launcher exit 137); then
 #   serves fake_server.py, which writes profile files to the configured neuron_profiler output_dir on /stop_profile.
+#   Run 2: prints upstream e16d424's exact log lines for the runner choice (decode_context_length_buckets -> V1) and
+#   the KV budget with VLLM_NEURON_RESERVED_HEADROOM_GIB; FAKE_SLOW_READY="<port>:<seconds>" delays one arm's ready.
 #  bench serve: writes a vllm-bench-style result; FAKE_BENCH_FAIL_PORTS -> exit 1 with no result;
 #   FAKE_BENCH_COMPLETED="<port>:<n>" -> a valid result with only n completed. Output tok/s = port-dependent.
+#   --save-detailed -> per-request ttfts (s), itls (s, per request), output_lens, input_lens, e2els (s).
+#   --random-range-ratio r -> input lengths spread over [len*(1-r), len*(1+r)], deterministic.
+#   FAKE_BENCH_TTFT="<port>:<s>", FAKE_BENCH_TPOT_MS="<port>:<ms>" -> per-request latency for that arm;
+#   FAKE_BENCH_ITL_CHUNKS="<port>:<n>" -> n streaming intervals per request instead of output_len - 1 (same total time).
 if [ "${1:-}" = bench ]; then
   exec python3 - "$@" <<'PY'
 import json, os, re, sys
 a = sys.argv[1:]
-v = lambda k: a[a.index(k) + 1]
+v = lambda k, d=None: a[a.index(k) + 1] if k in a else d
 port = re.search(r":(\d+)$", v("--base-url")).group(1); n = int(v("--num-prompts")); out = int(v("--random-output-len"))
+def spec(var):
+    for s in os.environ.get(var, "").split():
+        p, x = s.split(":")
+        if p == port:
+            return x
 if port in os.environ.get("FAKE_BENCH_FAIL_PORTS", "").split():
     sys.exit("fake bench failure")
-done = n
-for spec in os.environ.get("FAKE_BENCH_COMPLETED", "").split():
-    p, k = spec.split(":")
-    if p == port:
-        done = int(k)
+done = int(spec("FAKE_BENCH_COMPLETED") or n)
 tps = 100.0 * (1 + int(port) % 2)   # T (even port) 100 tok/s, C (odd port) 200 tok/s
 os.makedirs(v("--result-dir"), exist_ok=True)
-inl = int(v("--random-input-len"))
-json.dump({"num_prompts": n, "completed": done, "failed": n - done, "total_output_tokens": done * out,
-           "total_input_tokens": n * inl,
-           "output_throughput": tps, "median_tpot_ms": 1000.0 / tps, "median_ttft_ms": 50.0},
-          open(os.path.join(v("--result-dir"), v("--result-filename")), "w"))
+inl = int(v("--random-input-len")); ratio = float(v("--random-range-ratio", "0") or 0)
+lo, hi = int(inl * (1 - ratio)), int(inl * (1 + ratio))
+input_lens = [lo + (i * 7919) % (hi - lo + 1) if hi > lo else inl for i in range(n)]
+tpot = float(spec("FAKE_BENCH_TPOT_MS") or 1000.0 / tps) / 1000.0
+res = {"num_prompts": n, "completed": done, "failed": n - done, "total_output_tokens": done * out,
+       "total_input_tokens": sum(input_lens),
+       "output_throughput": tps, "median_tpot_ms": 1000.0 * tpot, "median_ttft_ms": 50.0}
+if "--save-detailed" in a:
+    ttft0 = spec("FAKE_BENCH_TTFT")
+    ttfts = [float(ttft0) if ttft0 else 0.05 * input_lens[i] / 1024 for i in range(done)]
+    chunks = spec("FAKE_BENCH_ITL_CHUNKS")
+    k = int(chunks) if chunks else out - 1
+    itls = [[tpot * (out - 1) / k] * k for _ in range(done)]
+    res.update({"ttfts": ttfts, "itls": itls, "output_lens": [out] * done, "input_lens": input_lens[:done],
+                "e2els": [t + tpot * (out - 1) for t in ttfts], "errors": [""] * done})
+json.dump(res, open(os.path.join(v("--result-dir"), v("--result-filename")), "w"))
 PY
 fi
 port=""; cfg=""; while [ $# -gt 0 ]; do [ "$1" = --port ] && port=$2; [ "$1" = --additional-config ] && cfg=$2; shift; done
 echo "INFO fake vllm serve on port $port (cpu_mode=${VLLM_NEURON_CPU_MODE:-0})"
 # vLLM-style process prefixes; the fake is one process, so every role carries the server's PID (exec keeps it).
 echo "(EngineCore pid=$$) INFO fake engine"
+# runner choice, verbatim from upstream e16d424 (model_runner_v2_policy.py:429, neuron_model_runner.py:1050)
+dclb=$(python3 -c 'import json,sys; c=json.loads(sys.argv[1] or "{}"); b=c.get("neuron_config",{}).get("decode_context_length_buckets"); print(json.dumps(b) if b is not None else "")' "$cfg" 2>/dev/null)
+if [ -n "$dclb" ]; then
+  echo "(EngineCore pid=$$) WARNING model_runner_v2_policy.py:429 Neuron Model Runner V2 does not yet support decode context-length bucketing; using V1."
+  echo "(EngineCore pid=$$) INFO neuron_model_runner.py:1050 Using decode_context_length_buckets from config: $dclb"
+else
+  echo "(EngineCore pid=$$) INFO neuron_model_runner_v2.py:388 Using the standalone V2 Neuron model runner."
+fi
 for r in 0 1 2 3 4 5 6 7; do
   [[ " ${FAKE_DROP_TP_PORTS:-} " == *" $port "* ]] && [ $r = 5 ] && continue
-  echo "(Worker_TP$r pid=$$) INFO fake worker"; done
+  echo "(Worker_TP$r pid=$$) INFO fake worker"
+  # KV budget line, verbatim format from upstream neuron_worker.py:1367
+  hr=${VLLM_NEURON_RESERVED_HEADROOM_GIB:-}; src=explicit; [ -z "$hr" ] && { hr=3; src=default; }
+  python3 -c 'import sys; t,w,h=24.0,7.64,float(sys.argv[1]); print("(Worker_TP%s pid=%s) INFO neuron_worker.py:1366 KV cache budget: %.2f GiB logical-core HBM - %.2f GiB model weights - %.2f GiB headroom (%s) = %.2f GiB" % (sys.argv[2], sys.argv[3], t, w, h, sys.argv[4], max(t-w-h, 0)))' "$hr" "$r" "$$" "$src"
+done
 sleep "${FAKE_VLLM_DELAY:-3}"
+for s in ${FAKE_SLOW_READY:-}; do [ "${s%%:*}" = "$port" ] && sleep "${s#*:}"; done   # one arm slow to warm up
 if [ "${VLLM_NEURON_CPU_COMPILE:-0}" = 1 ]; then
   echo "INFO - neuron_worker.py:2199 - Extracting graphs for 2 prefill buckets: [(1024, 8192), (8192, 8192)]"
   full=$(python3 -c "print(', '.join(['1'] + [str(13 + i) for i in range(2 * ${FAKE_LAYERS:-2})]))")

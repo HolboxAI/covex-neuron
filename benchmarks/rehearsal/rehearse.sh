@@ -12,7 +12,7 @@ export CLIENT_DIR=$HOME/qwen3-asr-inference-cuda-trainium
 # fresh results every attempt: a stale probe output must never reach a verdict
 [ -d results ] && [ -n "$(ls -A results 2>/dev/null)" ] && mv results "results.prev.$(date +%s)"
 mkdir -p results logs; : > REHEARSAL.tsv
-port() { case $1 in q32-T) echo 8000;; q32-C) echo 8001;; q32-U) echo 8008;; q32-K) echo 8009;; q32-F) echo 8010;; asr-T) echo 8002;; asr-C) echo 8003;;
+port() { case $1 in q32-T) echo 8000;; q32-C) echo 8001;; q32-U) echo 8008;; q32-K) echo 8009;; q32-F) echo 8010;; q32-Ut) echo 8011;; asr-T) echo 8002;; asr-C) echo 8003;;
                     emb-T) echo 8004;; emb-C) echo 8005;; vl-T) echo 8006;; vl-C) echo 8007;; esac; }
 log_of() { case $1 in asr-T) echo "logs/S2-$2-T.server.log";; asr-C) echo "logs/DL-$2-C.server.log";; *) echo "logs/$1-$2.server.log";; esac; }
 NCPU=$(nproc)
@@ -47,6 +47,10 @@ stop() {  # port arm: kill the arm's process tree by PID (no command-line patter
   killtree "${SPID[$2]}" TERM; local i; for i in 1 2 3 4 5 6; do kill -0 "${SPID[$2]}" 2>/dev/null || break; sleep 1; done
   killtree "${SPID[$2]}" KILL; true; }
 
+in_pairs() { [[ " ${PAIRS[*]} " == *" $1 "* ]]; }          # exact arm name: q32-U must not match q32-Ut
+is_one_of() { local x=$1; shift; [[ " $* " == *" $x "* ]]; }
+LONG_ARMS=${REHEARSAL_LONG_ARMS:-"q32-U q32-Ut q32-F"}
+
 # ---------------- Track A: CPU mode, small same-architecture checkpoints ----------------
 cpu_probe() {  # arm port
   case $1 in
@@ -65,7 +69,7 @@ track_a() {
   # REHEARSAL_PAIRS_A / _B (";"-separated) narrow the arms, e.g. for the CI harness test.
   # No vl-* in CPU mode: vllm-neuron's torch fallback for block-KV attention rejects GQA with 2 KV heads/rank
   # (Qwen3-VL at TP4; rehearsal 1). VL is covered by the compile track; its runtime only on Trainium.
-  IFS=";" read -r -a PAIRS <<< "${REHEARSAL_PAIRS_A:-q32-T q32-K;q32-U q32-C;q32-F}"
+  IFS=";" read -r -a PAIRS <<< "${REHEARSAL_PAIRS_A:-q32-T q32-K;q32-U q32-Ut;q32-F}"
   for pair in "${PAIRS[@]}"; do
     i=0; for a in $pair; do serve cpu $a 100 $HOME/models-small "$(cpuset $((i*8)) $((i*8+7)))" & SPID[$a]=$!; i=$((i+1)); done
     for a in $pair; do p=$(( $(port $a) + 100 )); L=$(log_of $a cpu)
@@ -73,20 +77,25 @@ track_a() {
       if [ $rc != 0 ]; then record $a cpu FAIL "$([ $rc = 2 ] && echo 'not up in 20 min' || { [ -s "$L" ] && echo 'server died' || echo 'did not start (empty log)'; }): $(first_err $L)"; stop $p $a; continue; fi
       if cpu_probe $a $p > logs/$a.cpu.probe.log 2>&1 && curl -sf "localhost:$p/health" > /dev/null; then record $a cpu PASS "served real requests"
       else record $a cpu FAIL "requests: $(first_err $L)$(tail -1 logs/$a.cpu.probe.log | cut -c1-120)"; fi
+      if is_one_of $a $LONG_ARMS; then   # prompts over max_num_batched_tokens (8192): segmented prefill, unproven in run 1
+        if lr=$(timeout 2400 python3 "$H/rehearsal/long_prompt.py" $p "${LONG_LENGTHS:-9644,24044}" 8 2> logs/$a.cpu.long.log) \
+           && curl -sf "localhost:$p/health" > /dev/null; then record $a long-prompt PASS "$lr"
+        else record $a long-prompt FAIL "$(tail -1 logs/$a.cpu.long.log | cut -c1-160) $(first_err $L)"; fi
+      fi
       stop $p $a
     done
   done
   # provenance verdict for the q32 arms that ran (U against UPSTREAM_DIR, the rest against this checkout)
-  exp=(); for a in q32-U q32-T q32-K q32-C q32-F; do [[ " ${PAIRS[*]} " == *"$a"* ]] || continue
-    [ $a = q32-U ] && exp+=("$a=${UPSTREAM_DIR:-/nonexistent}") || exp+=("$a=${FORK_DIR:-$(cd "$H/.." && pwd)}"); done
+  exp=(); for a in q32-U q32-Ut q32-T q32-K q32-C q32-F; do in_pairs $a || continue
+    case $a in q32-U|q32-Ut) exp+=("$a=${UPSTREAM_DIR:-/nonexistent}");; *) exp+=("$a=${FORK_DIR:-$(cd "$H/.." && pwd)}");; esac; done
   if [ ${#exp[@]} -gt 0 ]; then
     python3 "$H/provenance/verify.py" "$COVEX_PROVENANCE_DIR" "${REHEARSAL_MIN_PROCS:-9}" "${exp[@]}" > results/provenance-cpu.tsv
     while IFS=$'\t' read -r a st why; do record "$a" provenance "$st" "$why"; done < results/provenance-cpu.tsv
   fi
   unset COVEX_PROVENANCE_DIR
   # greedy agreement with the stock fork arm, from THIS attempt's probes: exact count, non-empty, identical
-  for a in q32-K q32-U q32-C q32-F; do
-    [[ " ${PAIRS[*]} " == *"$a"* ]] || continue
+  for a in q32-K q32-U q32-Ut q32-C q32-F; do
+    in_pairs $a || continue
     if [ -s results/q32-T.cpu.gen.json ] && [ -s results/$a.cpu.gen.json ]; then
       m=$(python3 $C match results/q32-T.cpu.gen.json results/$a.cpu.gen.json 2>&1)
       v=$(python3 -c 'import json,sys; d=json.loads(sys.argv[1]); n=int(sys.argv[2]); print("PASS" if d.get("pass") and d.get("n")==n else "FAIL")' "$m" "${PROBE_N:-4}" 2>/dev/null || echo FAIL)
@@ -103,7 +112,7 @@ track_b() {
          ARM_CACHE_BASE=$HOME/neff_cache NEURON_LIBTORCH_PARALLEL_COMPILE_WORKERS=8
   mkdir -p $HOME/neff_cache
   # asr-T/asr-C/emb-T already compiled and served on Trainium (2026-11-27); spend the time on the arms that never did.
-  IFS=";" read -r -a PAIRS <<< "${REHEARSAL_PAIRS_B:-q32-K q32-T;q32-U q32-C;q32-F}"
+  IFS=";" read -r -a PAIRS <<< "${REHEARSAL_PAIRS_B:-q32-K q32-T;q32-U q32-Ut;q32-F}"
   for pair in "${PAIRS[@]}"; do
     for a in $pair; do need $a || { record $a compile FAIL "checkpoint not downloaded"; continue 2; }; done
     i=0; for a in $pair; do
@@ -123,6 +132,7 @@ track_b() {
       elif [ "$rc" = 1 ] && [ "$exit_rc" != 0 ]; then record $a compile FAIL "launcher exited $exit_rc: ${bad:-$(first_err "$L")}"
       elif [ "$rc" = 2 ]; then record $a compile FAIL "not done in 30 min: ${bad:-$(first_err "$L")}"
       elif ! grep -qF "Model warmup completed:" "$L"; then record $a compile FAIL "no post-compilation completion marker: ${bad:-$(first_err "$L")}"
+      elif grep -qiE "fail_on_recompile|recompil" "$L"; then record $a compile FAIL "recompile: $(grep -m1 -iE 'fail_on_recompile|recompil' "$L" | cut -c1-200)"
       elif [ $rc = 0 ] && [ -z "$bad" ]; then record $a compile PASS "compiled, server up"
       elif [ $rc = 1 ] && [ -z "$bad" ] && ! grep -qE "Traceback|Error:" "$L"; then record $a compile PASS "compiled, exited clean"
       else record $a compile FAIL "${bad:-$(first_err "$L")}"; fi
@@ -139,6 +149,14 @@ track_b() {
       record q32-T kv-identity UNVERIFIED "compile log has parameter ordinals only; named K/V bindings not available"
     fi
     for a in $pair; do [[ $a == q32-* && $a != q32-T ]] || continue
+      if [ $a = q32-Ut ]; then   # extra (batch x context-bucket) decode graphs: lanes differ from stock's 6, so no
+        # lane-matched parity; require every lane present on all 8 ranks with full KV aliasing (count + SPMD checks)
+        La=$(log_of $a compile); nl=$(grep -oE "\[trace lane=[0-9]+ " "$La" 2>/dev/null | sort -u | wc -l | tr -d ' ')
+        res=$(python3 "$H/rehearsal/alias_check.py" "$La" "$cfgj" "${nl:-0}" 8 2>&1)
+        case "${res%%	*}" in UNVERIFIED) [ "${nl:-0}" -ge 6 ] && st=PASS || st=FAIL; res="x	$nl lanes (>= 6 needed), all ranks, full aliasing; no lane-matched stock reference: ${res#*	}";;
+          FAIL) st=FAIL;; *) st=FAIL; res="x	alias_check error: $res";; esac
+        record $a compile-alias $st "${res#*	}"; record $a kv-identity UNVERIFIED "count + SPMD only (extra decode-bucket graphs)"; continue
+      fi
       if [ -s "$LT" ]; then res=$(python3 "$H/rehearsal/alias_check.py" "$(log_of $a compile)" "$cfgj" 6 8 --ref "$LT" 2>&1)
       else res=$(python3 "$H/rehearsal/alias_check.py" "$(log_of $a compile)" "$cfgj" 6 8 2>&1); fi
       case "${res%%	*}" in PASS|FAIL|UNVERIFIED) st=${res%%	*};; *) st=FAIL; res="x	alias_check error: $res";; esac
@@ -163,6 +181,15 @@ REQUIRED=${REHEARSAL_REQUIRED:-"q32-T:cpu q32-K:cpu q32-U:cpu q32-T:provenance q
 # agreement stays informational (dynamic FA may legitimately change greedy tokens)
 if [[ " ${REHEARSAL_PAIRS_A:-q32-F} ${REHEARSAL_PAIRS_B:-q32-F} " == *q32-F* ]] && [ -z "${REHEARSAL_REQUIRED_SET:-}" ]; then
   REQUIRED="$REQUIRED q32-F:cpu q32-F:provenance q32-F:compile q32-F:compile-alias"; fi
+# run 2: tuned upstream (decode_context_length_buckets) is a scheduled arm, and long prompts (> 8192 batched tokens)
+# must be served by every arm that gets them on Trainium. Arm lists are ";"-separated pairs; compare exact names.
+PA=" $(echo "${REHEARSAL_PAIRS_A:-q32-T q32-K;q32-U q32-Ut;q32-F}" | tr ';' ' ') "
+PB=" $(echo "${REHEARSAL_PAIRS_B:-q32-K q32-T;q32-U q32-Ut;q32-F}" | tr ';' ' ') "
+if [ -z "${REHEARSAL_REQUIRED_SET:-}" ]; then
+  [[ "$PA" == *" q32-Ut "* ]] && REQUIRED="$REQUIRED q32-Ut:cpu q32-Ut:provenance q32-Ut:cpu-match"
+  [[ "$PB" == *" q32-Ut "* ]] && REQUIRED="$REQUIRED q32-Ut:compile q32-Ut:compile-alias"
+  for a in $LONG_ARMS; do [[ "$PA" == *" $a "* ]] && REQUIRED="$REQUIRED $a:long-prompt"; done
+fi
 overall=0
 for r in $REQUIRED; do
   st=$(awk -F'\t' -v a="${r%%:*}" -v t="${r#*:}" '$1==a && $2==t {print $3}' REHEARSAL.tsv | tail -1)
