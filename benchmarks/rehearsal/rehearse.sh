@@ -59,8 +59,7 @@ track_a() {
     i=0; for a in $pair; do serve cpu $a 100 $HOME/models-small "$(cpuset $((i*8)) $((i*8+7)))" & SPID[$a]=$!; i=$((i+1)); done
     for a in $pair; do p=$(( $(port $a) + 100 )); L=$(log_of $a cpu)
       wait_up $a $p 1200; rc=$?
-      if [ ! -s "$L" ]; then record $a cpu FAIL "empty server log (did not start)"; stop $p; continue; fi
-      if [ $rc != 0 ]; then record $a cpu FAIL "$([ $rc = 2 ] && echo 'not up in 20 min' || echo 'server died'): $(first_err $L)"; stop $p; continue; fi
+      if [ $rc != 0 ]; then record $a cpu FAIL "$([ $rc = 2 ] && echo 'not up in 20 min' || { [ -s "$L" ] && echo 'server died' || echo 'did not start (empty log)'; }): $(first_err $L)"; stop $p; continue; fi
       if cpu_probe $a $p > logs/$a.cpu.probe.log 2>&1 && curl -sf "localhost:$p/health" > /dev/null; then record $a cpu PASS "served real requests"
       else record $a cpu FAIL "requests: $(first_err $L)$(tail -1 logs/$a.cpu.probe.log | cut -c1-120)"; fi
       stop $p
