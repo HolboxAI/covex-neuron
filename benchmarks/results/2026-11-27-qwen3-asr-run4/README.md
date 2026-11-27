@@ -5,7 +5,7 @@
 - **Version note:** the Qwen3-ASR model code is identical in vllm-neuron release 0.29.0.1.2.0 and main@e16d424.
 - **Setup:** 4 arms at once, each on its own 2 chips (TP8, encoder DP8), 16 max seqs, max_model_len 1024, no prefix cache.
 - **Client:** Dax's benchmark client `4ce1ddb`. 100 LibriSpeech test-clean clips × 2 rounds = 200 requests per level, c1 / c8 / 16. One repeat, so these results are directional.
-- **Prompt tokens per clip:** `{"n": 100, "min": 39, "p50": 82.5, "p90": 183, "max": 318}`. Every prefill fits the 128-token bucket.
+- **Prompt tokens per clip** (chat endpoint usage, 100 clips): min 39, p50 82.5, p90 183, max 318. Prefills use the 128 / 256 / 512 buckets; per-bucket padding counts are in `metrics/`.
 
 ## Arms
 
