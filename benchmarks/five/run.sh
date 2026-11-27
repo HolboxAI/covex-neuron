@@ -12,7 +12,7 @@ pin() { taskset -c "${CPU[$1]}" "${@:2}"; }
 start() {  # arm
   case $1 in
     asr-T) SOLO=1 PROFILE=1 LOG_TAG=-T pin asr-T "$A/serve.sh" S2 2 8002 ;;
-    asr-C) SOLO=1 PROFILE=1 LOG_TAG=-C pin asr-C "$A/serve.sh" DMBL 3 8003 ;;
+    asr-C) SOLO=1 PROFILE=1 LOG_TAG=-C pin asr-C "$A/serve.sh" DL 3 8003 ;;
     q32-*) PROFILE=1 pin "$1" "$H/serve.sh" "$1" "${PORT[$1]}" ;;
     *)     pin "$1" "$H/serve.sh" "$1" "${PORT[$1]}" ;;
   esac
@@ -64,7 +64,7 @@ for a in q32-T q32-C; do up $a || continue
     && curl -sf -X POST "localhost:${PORT[$a]}/stop_profile" > /dev/null
 done
 for a in asr-T asr-C; do up $a || continue
-  pa=$([ $a = asr-T ] && echo S2 || echo DMBL)
+  pa=$([ $a = asr-T ] && echo S2 || echo DL)
   curl -sf -X POST "localhost:${PORT[$a]}/start_profile" > /dev/null && SOLO=1 ROUNDS=1 pin $a "$A/bench.sh" $a-prof ${PORT[$a]} 32 8 \
     && curl -sf -X POST "localhost:${PORT[$a]}/stop_profile" > /dev/null
 done

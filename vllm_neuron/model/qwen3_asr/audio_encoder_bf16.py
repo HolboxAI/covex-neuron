@@ -209,18 +209,6 @@ class Qwen3ASRAudioMLP(nn.Module):
             ``[..., d_model]`` — same leading dims as input.
         """
 
-        if _AUDIO_MLP_NKI and pre_norm is not None and not getattr(Qwen3ASRAudioMLP, "_covex_path_logged", False):
-            # COVEX: NF.mlp falls back to torch silently when the kernel is ineligible. Log the branch once so
-            # an arm measuring the torch path is visible in the server log (grep "COVEX LN-in-MLP").
-            from vllm_neuron.functional.mlp import _can_use_kernel
-
-            logging.getLogger(__name__).warning(
-                "COVEX LN-in-MLP: nkilib kernel path=%s for T=%d H=%d",
-                _can_use_kernel(hidden_states.reshape(-1, self.d_model), self.up_proj_weight,
-                                up_b=self.up_proj_bias.unsqueeze(0)),
-                hidden_states.numel() // self.d_model, self.d_model,
-            )
-            Qwen3ASRAudioMLP._covex_path_logged = True
 
         if _AUDIO_MLP_NKI:
             # The nkilib MLP kernel takes a 2D [T, H] activation; the audio
