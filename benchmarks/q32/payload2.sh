@@ -20,15 +20,19 @@ set -x
 fail() { echo "SETUP FAILED $1" | tee ~/run/STATUS; aws s3 cp ~/run/STATUS "s3://$B/$P/STATUS" --region "$R" --only-show-errors; exit 1; }
 B=covex-neuron-runs-992382417943; R=us-east-2; P=$(cat ~/run/PREFIX)   # defined here: sudo -i may strip passed vars
 V=/opt/aws_neuronx_venv_pytorch_inference_vllm_0_29_0_1_2_0
-cd ~ && git clone -q https://github.com/HolboxAI/covex-neuron && git -C covex-neuron checkout -q @@COVEX_SHA@@ || fail fork
-git clone -q https://github.com/vllm-project/vllm-neuron upstream && git -C upstream checkout -q @@UPSTREAM_SHA@@ || fail upstream
+# Setup shares the boot-relative readiness deadline: a stalled clone, pip or model download stops the attempt
+# (status uploaded, then shutdown) instead of running past it before the runner's watchdog starts.
+READY_AT=$(( $(cat ~/run/BOOT) + @@READY_MIN@@ * 60 ))
+T() { local l=$(( READY_AT - $(date +%s) )); [ $l -gt 0 ] || { echo "setup past the readiness deadline"; return 124; }; timeout "$l" "$@"; }
+cd ~ && T git clone -q https://github.com/HolboxAI/covex-neuron && git -C covex-neuron checkout -q @@COVEX_SHA@@ || fail fork
+T git clone -q https://github.com/vllm-project/vllm-neuron upstream && git -C upstream checkout -q @@UPSTREAM_SHA@@ || fail upstream
 # Arm U gets its own environment: a copy of the pristine DLAMI venv (same Neuron stack, taken BEFORE the fork is
 # installed) with only pinned upstream installed, run by absolute interpreter. The fork goes into the original venv.
-cp -a "$V" ~/venv-upstream && ~/venv-upstream/bin/python -m pip install -q --no-deps -e ~/upstream || fail "upstream venv"
+T cp -a "$V" ~/venv-upstream && T ~/venv-upstream/bin/python -m pip install -q --no-deps -e ~/upstream || fail "upstream venv"
 source "$V/bin/activate"
-pip install -q --no-deps -e covex-neuron && pip install -q httpx huggingface_hub || fail pip
+T pip install -q --no-deps -e covex-neuron && T pip install -q httpx huggingface_hub || fail pip
 ~/venv-upstream/bin/python -m pip freeze > ~/run/pip_freeze_upstream.txt; pip freeze > ~/run/pip_freeze.txt
-hf download Qwen/Qwen3-32B --revision @@MODEL_REV@@ --local-dir ~/models/Qwen3-32B > /dev/null && ls ~/models/Qwen3-32B/config.json || fail model
+T hf download Qwen/Qwen3-32B --revision @@MODEL_REV@@ --local-dir ~/models/Qwen3-32B > /dev/null && ls ~/models/Qwen3-32B/config.json || fail model
 # run manifest: everything needed to reproduce or audit this attempt
 python3 - > ~/run/manifest.json <<PY
 import hashlib, json, subprocess as sp
@@ -60,7 +64,7 @@ chmod +x ~/upload_evidence.sh
 cd ~/run && UPSTREAM_DIR=~/upstream UPSTREAM_PY=~/venv-upstream/bin/python ARM_CACHE_BASE=/var/tmp/covex-arm-cache \
   EVIDENCE_UPLOAD=~/upload_evidence.sh \
   UPSTREAM_PREFIX=$HOME/venv-upstream FORK_PREFIX=$V \
-  Q32_WINDOWS=@@WINDOWS@@ Q32_READY_DEADLINE=$(( $(cat ~/run/BOOT) + @@READY_MIN@@ * 60 )) \
+  Q32_WINDOWS=@@WINDOWS@@ Q32_READY_DEADLINE=$READY_AT \
   Q32_DEADLINE=$(( $(cat ~/run/BOOT) + 68 * 60 )) bash ~/covex-neuron/benchmarks/q32/run2.sh
 echo "RUN_EXIT=$?" | tee ~/run/STATUS
 aws s3 sync ~/run s3://$B/$P/ --region $R --only-show-errors --exclude "evidence/*"

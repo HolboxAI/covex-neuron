@@ -1287,15 +1287,19 @@ def _run2_fixture(tmp_path, ut_tpot_itl=0.02, f_replay_pass=True, ut_needle_fail
         (tmp_path / f"{arm}-m5k-c8-w1.json").write_text(json.dumps(bench(16, 81234, itl)))
         if arm != "q32-U":
             for k in (1, 3):
-                (tmp_path / f"{arm}.vs.q32-U.cache.c{k}.match.json").write_text(json.dumps({"pass": True, "n": 18}))
+                (tmp_path / f"{arm}.vs.q32-U.cache.c{k}.match.json").write_text(json.dumps({"pass": True, "n": 18, "gen_tokens": 32, "exact_match": "18/18", "first_diff": None}))
             ok = f_replay_pass or arm != "q32-F"
             (tmp_path / f"{arm}.vs.q32-U.replay.match.json").write_text(json.dumps(
-                {"pass": ok, "n": 8, "mismatches": [] if ok else [{"i": 3, "first_diff": 5, "near_tie": True}]}))
+                {"pass": ok, "n": 8, "mismatches": [] if ok else [{"i": 3, "first_diff": 5, "a": 12, "b": 13, "near_tie": True, "gap": 0.02}]}))
         bad = ut_needle_fail and arm == "q32-Ut"
         (tmp_path / f"{arm}.needle.json").write_text(json.dumps({"pass": not bad, "results": [
-            {"len": L, "pass": not (bad and L == 24044), "got": "1234" if not (bad and L == 24044) else "999"}
+            {"len": L, "expected": "1234", "pass": not (bad and L == 24044), "got": "1234" if not (bad and L == 24044) else "999"}
             for L in (8204, 9644, 24044)]}))
-    (tmp_path / "q32-U.rerun.vs.q32-U.replay.match.json").write_text(json.dumps({"pass": u_rerun_pass, "n": 8}))
+        (tmp_path / f"{arm}.vs.q32-U.needle.match.json").write_text(json.dumps({
+            "pass": not bad, "n": 3, "lengths": [8204, 9644, 24044]}))
+    (tmp_path / "q32-U.rerun.vs.q32-U.replay.match.json").write_text(json.dumps({
+        "pass": u_rerun_pass, "n": 8, "mismatches": [] if u_rerun_pass else [
+            {"i": 0, "first_diff": 0, "a": 1, "b": 2, "near_tie": False, "gap": None}]}))
     (tmp_path / "runner.tsv").write_text("q32-U\tMRv2\tnone\tKV cache budget: 24 - 7.64 - 7.00 = 9.36 GiB\n")
     r = subprocess.run(["python3", str(ROOT / "benchmarks/q32/summarize.py"), str(tmp_path), "--arms", "q32-U q32-Ut q32-F",
                         "--windows", "1", "--workloads", "c1 c8 m5k-c8", "--run2",
@@ -1343,7 +1347,9 @@ def test_q32_run2_invalid_u_baseline_suppresses_every_ratio(tmp_path):
     sub = tmp_path / "b"; sub.mkdir()
     _run2_fixture(sub)
     (sub / "q32-U.needle.json").write_text(json.dumps({"pass": False, "results": [
-        {"len": L, "pass": False, "got": "0"} for L in (8204, 9644, 24044)]}))
+        {"len": L, "expected": "1234", "pass": False, "got": "0"} for L in (8204, 9644, 24044)]}))
+    (sub / "q32-U.vs.q32-U.needle.match.json").write_text(json.dumps({
+        "pass": False, "n": 3, "lengths": [8204, 9644, 24044]}))
     r = subprocess.run(["python3", str(ROOT / "benchmarks/q32/summarize.py"), str(sub), "--arms", "q32-U q32-Ut q32-F",
                         "--windows", "1", "--workloads", "c1 c8 m5k-c8", "--run2", "--required", "q32-Ut:q32-U q32-F:q32-U"],
                        capture_output=True, text=True)
@@ -1453,7 +1459,10 @@ def test_run2_payload_renders_with_pins_deadline_and_run2(tmp_path):
     assert r.returncode == 0, r.stderr
     t = out.read_text()
     assert "@@" not in t and "benchmarks/q32/run2.sh" in t and "Q32_DEADLINE=" in t
-    assert "Q32_READY_DEADLINE=$(( $(cat ~/run/BOOT) + 20 * 60 ))" in t, "readiness: 20 min from boot for every arm"
+    assert "READY_AT=$(( $(cat ~/run/BOOT) + 20 * 60 ))" in t and "Q32_READY_DEADLINE=$READY_AT" in t, "20 min from boot"
+    for step in ("T git clone -q https://github.com/HolboxAI", "T git clone -q https://github.com/vllm-project",
+                 "T cp -a", "T pip install -q --no-deps -e covex-neuron", "T hf download"):
+        assert step in t, f"setup step not bounded by the readiness deadline: {step}"
     assert "UPSTREAM_PREFIX=$HOME/venv-upstream FORK_PREFIX=$V" in t, "provenance must check each arm's environment"
     m = re.search(r"^shutdown -h \+(\d+)", t, re.M)
     assert m and int(m.group(1)) * 8.60 / 60 <= 11.0, "hard stop must stay inside the $11 cap"
@@ -1542,3 +1551,73 @@ def test_q32_run2_missing_comparison_is_incomplete_but_mismatch_is_a_finding(tmp
     d = tmp_path / "mismatch"; d.mkdir()
     r = _run2_fixture(d, f_replay_pass=False)                                # a completed token difference
     assert r.returncode == 0 and "replay differs on 1 prompt(s)" in r.stdout, r.stdout
+
+
+@pytest.mark.parametrize("arm,kind", [
+    ("q32-F", "replay"), ("q32-F", "cache.c3"), ("q32-F", "needle"),
+    ("q32-K", "replay"), ("q32-K", "cache.c1"), ("q32-Ut", "needle"),
+    ("q32-U", "needle"),
+])
+def test_run2_missing_required_artifact_for_each_arm(tmp_path, arm, kind):
+    _run2_fixture(tmp_path)
+    for check in ("replay", "cache.c1", "cache.c3"):
+        shutil.copyfile(tmp_path / f"q32-Ut.vs.q32-U.{check}.match.json",
+                        tmp_path / f"q32-K.vs.q32-U.{check}.match.json")
+    cmd = ["python3", str(ROOT / "benchmarks/q32/summarize.py"), str(tmp_path),
+           "--arms", "q32-U q32-Ut q32-F", "--replay-arms", "q32-K", "--windows", "1",
+           "--workloads", "c1 c8 m5k-c8", "--run2", "--required", "q32-Ut:q32-U q32-F:q32-U"]
+    assert subprocess.run(cmd, capture_output=True).returncode == 0
+    (tmp_path / f"{arm}.vs.q32-U.{kind}.match.json").unlink()
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    assert result.returncode == 1 and "INCOMPLETE (required)" in result.stdout
+    if arm == "q32-F":
+        row = next(s for s in result.stdout.splitlines() if s.startswith("| q32-F | q32-U | c1 |"))
+        assert row.split("|")[6].strip() == "–"
+
+
+@pytest.mark.parametrize("verdict", ["false", None, 1, False])
+def test_run2_malformed_replay_cannot_pass_or_count_as_a_mismatch(tmp_path, verdict):
+    _run2_fixture(tmp_path)
+    (tmp_path / "q32-Ut.vs.q32-U.replay.match.json").write_text(json.dumps({
+        "pass": verdict, "n": 8, "mismatches": []}))
+    r = subprocess.run(["python3", str(ROOT / "benchmarks/q32/summarize.py"), str(tmp_path),
+                        "--arms", "q32-U q32-Ut q32-F", "--windows", "1", "--run2", "--required", "q32-Ut:q32-U"],
+                       capture_output=True, text=True)
+    assert r.returncode == 1 and "malformed replay verdict" in r.stdout
+
+
+def test_run2_completed_dynamic_attention_difference_shows_tps_and_withholds_ratio(tmp_path):
+    r = _run2_fixture(tmp_path, f_replay_pass=False)
+    assert r.returncode == 0
+    row = next(s for s in r.stdout.splitlines() if s.startswith("| q32-F | q32-U | c1 |"))
+    assert [cell.strip() for cell in row.split("|")[4:7]] == ["100.0", "100.0", "–"]
+
+
+def test_q32_run2_every_required_comparison_and_strict_verdicts(tmp_path):
+    """Astra (d195482): deleting F's or K's comparison still exited 0, and "pass": "false" got a ratio."""
+    def summ(d):
+        return subprocess.run(["python3", str(ROOT / "benchmarks/q32/summarize.py"), str(d), "--arms", "q32-U q32-Ut q32-F",
+                               "--replay-arms", "q32-K", "--windows", "1", "--workloads", "c1 c8 m5k-c8", "--run2",
+                               "--required", "q32-Ut:q32-U q32-F:q32-U"], capture_output=True, text=True)
+    def fixture(name):
+        d = tmp_path / name; d.mkdir(); _run2_fixture(d)
+        for k in (1, 3):
+            (d / f"q32-K.vs.q32-U.cache.c{k}.match.json").write_text(json.dumps(
+                {"pass": True, "n": 18, "gen_tokens": 32, "exact_match": "18/18", "first_diff": None}))
+        (d / "q32-K.vs.q32-U.replay.match.json").write_text(json.dumps({"pass": True, "n": 8, "mismatches": []}))
+        return d
+    assert summ(fixture("ok")).returncode == 0
+    for name, f in (("F", "q32-F.vs.q32-U.replay.match.json"), ("K", "q32-K.vs.q32-U.replay.match.json"),
+                    ("Kcache", "q32-K.vs.q32-U.cache.c3.match.json"), ("Fneedle", "q32-F.needle.json")):
+        d = fixture(name); (d / f).unlink()
+        r = summ(d)
+        assert r.returncode == 1 and "INCOMPLETE (required)" in r.stdout, (name, r.stdout[-1500:])
+    for f, bad in (("q32-Ut.vs.q32-U.replay.match.json", {"pass": "false", "n": 8, "mismatches": []}),
+                   ("q32-Ut.vs.q32-U.cache.c1.match.json", {"pass": "false", "n": 18, "gen_tokens": 32, "exact_match": "18/18", "first_diff": None}),
+                   ("q32-F.vs.q32-U.cache.c1.match.json", {"pass": 1, "n": 18, "gen_tokens": 32, "exact_match": "18/18", "first_diff": None})):
+        d = fixture("bad" + f[:10] + str(len(str(bad)))); (d / f).write_text(json.dumps(bad))
+        r = summ(d)
+        assert r.returncode == 1 and "INCOMPLETE (required)" in r.stdout, (f, r.stdout[-1500:])
+        cmp = r.stdout.split("## Comparisons", 1)[1].split("##", 1)[0]
+        arm = f.split(".vs.")[0]
+        assert not any(re.search(r"\| \d+\.\d+x", l) for l in cmp.splitlines() if l.startswith(f"| {arm} |")), cmp

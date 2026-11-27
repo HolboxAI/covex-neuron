@@ -4,6 +4,7 @@ Per arm and load point: output tok/s of every unprofiled window, the median, com
 (medians over windows). A ratio vs U or T is printed only when every window of both arms completed fully (gate.py) and
 the arm's greedy outputs on the exact-length cache prompts equal the reference at c1 and c3. Exit 1 when a required
 comparison (K vs U, K vs T) is incomplete."""
+import math
 import os, statistics, sys
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "five"))
 from gate import bench_ok, load, match_ok, same_work  # noqa: E402
@@ -78,40 +79,90 @@ def med(ds, k):
     return round(statistics.median(v), 2) if v else None
 
 
+# True means agreement, False means a completed disagreement, and None means
+# the comparison did not finish or its artifact cannot support a verdict.
 def needles_ok(arm):
     d = load(f"{R}/{arm}.needle.json")
-    if d is None:
-        return False, "needles not run"
-    res = d.get("results") or []
-    if sorted(r.get("len") for r in res) != NEEDLE_LENS:
-        return False, f"needles ran lengths {sorted(r.get('len') for r in res)}, expected {NEEDLE_LENS}"
-    if any(not isinstance(r.get("got"), str) for r in res):
-        return False, "needle tool error at " + ", ".join(str(r.get("len")) for r in res if not isinstance(r.get("got"), str))
-    if not d.get("pass") or not all(r.get("pass") for r in res):
-        return False, "needles failed at " + ", ".join(str(r.get("len")) for r in res if not r.get("pass"))
+    if not isinstance(d, dict):
+        return None, "needles not run"
+    rows = d.get("results")
+    if not isinstance(rows, list) or not all(isinstance(r, dict) and type(r.get("len")) is int for r in rows):
+        return None, "malformed needle results"
+    lengths = [r["len"] for r in rows]
+    if sorted(lengths) != NEEDLE_LENS:
+        return None, f"needles ran lengths {sorted(lengths)}, expected {NEEDLE_LENS}"
+    for row in rows:
+        if not isinstance(row.get("got"), str):
+            return None, f"needle tool error at {row['len']}"
+        if not isinstance(row.get("expected"), str) or not row["expected"] or row.get("pass") is not (row["got"].strip() == row["expected"]):
+            return None, f"invalid needle verdict at {row['len']}"
+    passed = all(r["pass"] for r in rows)
+    m = load(f"{R}/{arm}.vs.q32-U.needle.match.json")
+    if (d.get("pass") is not passed or not isinstance(m, dict) or m.get("pass") is not passed
+            or type(m.get("n")) is not int or m["n"] != len(rows) or m.get("lengths") != lengths):
+        return None, "missing or inconsistent needle comparison"
+    if not passed:
+        return False, "needles failed at " + ", ".join(str(r["len"]) for r in rows if not r["pass"])
     return True, ""
 
 
 def replay_ok(arm):
     d = load(f"{R}/{arm}.vs.q32-U.replay.match.json")
-    if d is None:
-        return False, "replay not run"
-    if d.get("n") != 8:
-        return False, f"replay covered n={d.get('n')}, expected 8"
-    if not d.get("pass"):
-        mm = d.get("mismatches") or []
-        nt = sum(1 for m in mm if m.get("near_tie"))
-        return False, f"replay differs on {len(mm)} prompt(s) ({nt} near-tie)"
+    if not isinstance(d, dict):
+        return None, "replay not run"
+    if type(d.get("n")) is not int or d["n"] != 8:
+        return None, f"replay covered n={d.get('n')}, expected 8"
+    mm = d.get("mismatches")
+    if not isinstance(mm, list) or d.get("pass") is not (len(mm) == 0):
+        return None, "malformed replay verdict"
+    seen = set()
+    for row in mm:
+        if not isinstance(row, dict):
+            return None, "malformed replay difference"
+        i, pos = row.get("i"), row.get("first_diff")
+        if (type(i) is not int or not 0 <= i < 8 or i in seen or type(pos) is not int or not 0 <= pos < 32
+                or type(row.get("near_tie")) is not bool
+                or any(type(row.get(k)) is not int or row[k] < 0 for k in ("a", "b")) or row["a"] == row["b"]):
+            return None, "malformed replay difference"
+        gap = row.get("gap")
+        if ("gap" not in row or
+                (gap is not None and (type(gap) not in (int, float) or not math.isfinite(gap) or gap < 0)) or
+                (gap is None and row["near_tie"])):
+            return None, "malformed replay logprob gap"
+        seen.add(i)
+    if mm:
+        return False, f"replay differs on {len(mm)} prompt(s) ({sum(m['near_tie'] for m in mm)} near-tie)"
     return True, ""
 
 
-# A check that did not complete (file missing, wrong sample count, tool error, wrong needle lengths) is missing work;
-# only a completed comparison with different tokens or a wrong answer is a finding.
-NOT_RUN = ("not run", "covered n=", "needles ran lengths", "needle tool error", "needles empty")
+def cache_ok(arm, ref, conc):
+    path = f"{R}/{arm}.vs.{ref}.cache.c{conc}.match.json"
+    if not RUN2:
+        return match_ok(path, 18)
+    d = load(path)
+    if (not isinstance(d, dict) or type(d.get("pass")) is not bool
+            or type(d.get("n")) is not int or d["n"] != 18 or type(d.get("gen_tokens")) is not int or d["gen_tokens"] != 32):
+        return None, "missing or invalid cache comparison"
+    exact = d.get("exact_match")
+    if exact == "18/18" and d["pass"] and d.get("first_diff") is None:
+        return True, ""
+    pos = d.get("first_diff")
+    if (not d["pass"] and isinstance(exact, str) and exact in {f"{n}/18" for n in range(18)} and isinstance(pos, list) and len(pos) == 2
+            and all(type(x) is int for x in pos) and 0 <= pos[0] < 18 and 0 <= pos[1] < 32):
+        return False, f"outputs differ ({exact}, n=18)"
+    return None, "inconsistent cache comparison"
 
 
-def not_completed(reason):
-    return any(k in reason for k in NOT_RUN)
+def arm_checks(arm, ref):
+    checks = []
+    for conc in (1, 3):
+        ok, msg = cache_ok(arm, ref, conc)
+        checks.append((ok, f"cache c{conc}: {msg}"))
+    if RUN2 and ref == "q32-U":
+        checks.append(replay_ok(arm))
+        if arm not in REPLAY_ARMS:
+            checks.append(needles_ok(arm))
+    return checks
 
 
 def baseline():
@@ -129,10 +180,7 @@ BASE = baseline()
 
 def correctness(arm):
     """Reasons an arm's tokens are not established equal to U's (empty = equal on every check run)."""
-    why = [f"cache c{k}: {m[1]}" for k in (1, 3) for m in [match_ok(f"{R}/{arm}.vs.q32-U.cache.c{k}.match.json", 18)] if not m[0]]
-    if RUN2:
-        why += [m[1] for m in (replay_ok(arm), needles_ok(arm)) if not m[0]]
-    return why
+    return [reason for ok, reason in arm_checks(arm, "q32-U") if not ok]
 
 
 print("## Per arm (unprofiled windows)\n")
@@ -168,7 +216,7 @@ for arm in ARMS:
     for ref in ("q32-U", "q32-T"):
         if arm == ref or ref not in ARMS:
             continue
-        corr = [match_ok(f"{R}/{arm}.vs.{ref}.cache.c{k}.match.json", 18) for k in (1, 3)]
+        checks = arm_checks(arm, ref)
         for c, _ in LOADS:
             (x, bx), (r, br) = summary[(arm, c)], summary[(ref, c)]
             work = [same_work(load(f"{R}/{arm}-{c}-w{w}.json"), load(f"{R}/{ref}-{c}-w{w}.json")) for w in range(1, W + 1)]
@@ -177,15 +225,13 @@ for arm in ARMS:
             if ref == "q32-U" and BASE:
                 steps.append("U baseline invalid: " + "; ".join(BASE))
             hard = [f"{arm} {b}" for b in bx] + [f"{ref} {b}" for b in br] + [w for ok, w in work if not ok][:1] + steps
-            corr_why = [f"cache c{k}: {m[1]}" for k, m in zip((1, 3), corr) if not m[0]]
-            if RUN2 and ref == "q32-U":
-                corr_why += [m[1] for m in (replay_ok(arm), needles_ok(arm)) if not m[0]]
+            if RUN2:
+                hard.extend(reason for ok, reason in checks if ok is None)
+            corr_why = [reason for ok, reason in checks if ok is False]
             if arm in EXPLORATORY and not hard and corr_why and x and r:
-                # dynamic FA: keep throughput visible, labelled; tokens differ, so no equivalence or headline claim
-                print(f"| {arm} | {ref} | {c} | {x} | {r} | {x / r:.2f}x (exploratory) | tokens differ: {'; '.join(corr_why)} |")
+                ratio = "–" if RUN2 else f"{x / r:.2f}x (exploratory)"
+                print(f"| {arm} | {ref} | {c} | {x} | {r} | {ratio} | (exploratory) tokens differ: {'; '.join(corr_why)} |")
                 continue
-            if RUN2:   # a required check that never completed is missing work, not a finding
-                hard += [w for w in corr_why if not_completed(w)]
             why = hard + corr_why
             ratio = f"{x / r:.2f}x" if not why and x and r else "–"
             label = "complete" + (" (exploratory arm)" if arm in EXPLORATORY else "")
@@ -201,14 +247,17 @@ for arm in [x for x in ARMS if x in EXPLORATORY]:
         if bad or summary[(arm, c)][0] is None:
             incomplete.append(f"{arm} (requested exploratory arm) {c}: " + ("; ".join(bad) or "no valid windows"))
 if RUN2:
+    for arm in REPLAY_ARMS:
+        incomplete.extend(f"{arm}: {reason}" for ok, reason in arm_checks(arm, "q32-U") if ok is None)
     print("\n## Correctness vs U (run 2)\n")
-    rr = load(f"{R}/q32-U.rerun.vs.q32-U.replay.match.json")
-    print(f"U run twice on the same batch: {'identical' if rr and rr.get('pass') else 'NOT identical: replay diffs are not attributable' if rr else 'not run'}\n")
+    ok, reason = replay_ok("q32-U.rerun")
+    repeat = "identical" if ok else "NOT identical: replay diffs are not attributable" if ok is False else reason
+    print(f"U run twice on the same batch: {repeat}\n")
     print("| Arm | cache c1 | cache c3 | replay | needles 8,204 / 9,644 / 24,044 |\n|---|---|---|---|---|")
     if BASE:
         print("**U baseline invalid: " + "; ".join(BASE) + ".** No ratio or equivalence is reported against U; raw tok/s stay visible.\n")
     for arm in ARMS + REPLAY_ARMS:
-        cells = [("ok" if m[0] else m[1]) for m in [match_ok(f"{R}/{arm}.vs.q32-U.cache.c{k}.match.json", 18) for k in (1, 3)]] \
+        cells = [("ok" if m[0] else m[1]) for m in [cache_ok(arm, "q32-U", k) for k in (1, 3)]] \
             if arm != "q32-U" else ["reference", "reference"]
         cells += ["reference" if arm == "q32-U" else ("ok" if replay_ok(arm)[0] else replay_ok(arm)[1]),
                   ("not run (replay-only arm)" if arm in REPLAY_ARMS else "ok" if needles_ok(arm)[0] else needles_ok(arm)[1])]

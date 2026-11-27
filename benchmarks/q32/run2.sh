@@ -133,7 +133,7 @@ for a in $ARMS q32-U.rerun; do
   [ $a = q32-U ] && continue; [ -s $ref ] && [ -s $got ] || continue
   python3 "$H/replay.py" compare $ref $got --out results/$a.vs.q32-U.replay.match.json > /dev/null 2>> logs/replay-compare.err
 done
-P=(); for a in $ARMS; do up $a && { ( pin $a python3 "$H/needles.py" --base-url "$(url $a)" --model m --tokenizer "$TOK" \
+P=(); for a in $TIMED; do up $a && { ( pin $a python3 "$H/needles.py" --base-url "$(url $a)" --model m --tokenizer "$TOK" \
     --lengths 8204,9644,24044 --out results/$a.needle.json > logs/$a.needle.log 2>&1; rc=$?
     # A wrong answer is a finding (pass=false, a real answer in "got"). A tool/serving error (no JSON, wrong lengths, a
     # row without an answer) is a failed step.
