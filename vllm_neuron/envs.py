@@ -49,6 +49,8 @@ if TYPE_CHECKING:
     # COVEX: decode attention stops after the longest real context in the batch
     # (nkilib dynamic FA early exit). Off by default; Qwen3 decode only.
     COVEX_DECODE_DYNAMIC_FA: bool = False
+    # COVEX: Qwen3 decode (nkh == 1 path, BF16 KV) writes new K/V inside the attention kernel instead of index_put_.
+    COVEX_QWEN3_INKERNEL_KV_WRITE: bool = False
     VLLM_NEURON_RESERVED_HEADROOM_GIB: float | None = None
     VLLM_NEURON_WORKER_TERMINATION_TIMEOUT: int = 5
     VLLM_NEURON_NIXL_PROGRESS_THREAD_DELAY_US: int = 0
@@ -327,6 +329,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Default KV cap for the memory-utilization budget.
     "COVEX_DECODE_DYNAMIC_FA": lambda: (
         maybe_convert_bool(os.getenv("COVEX_DECODE_DYNAMIC_FA")) or False
+    ),
+    "COVEX_QWEN3_INKERNEL_KV_WRITE": lambda: (
+        maybe_convert_bool(os.getenv("COVEX_QWEN3_INKERNEL_KV_WRITE")) or False
     ),
     "VLLM_NEURON_KV_GMU_BUDGET_CAP_FRACTION": lambda: (
         maybe_convert_float(os.getenv("VLLM_NEURON_KV_GMU_BUDGET_CAP_FRACTION"))

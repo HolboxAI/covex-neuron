@@ -541,7 +541,8 @@ class Qwen3Attention(nn.Module):
 
         # <-- MODEL-SPECIFIC: rmsnorm_QK_pre_rope_enabled=True for QK-norm;
         # must pass learned gamma weights so decode matches prefill.
-        output, K_new, V_new = NF.attention_decode(
+        _INKERNEL_KV = envs.COVEX_QWEN3_INKERNEL_KV_WRITE and self.k_scale is None
+        _res = NF.attention_decode(
             X=X,
             X_hidden_dim_actual=self.hidden_size,
             # Input RMSNorm intentionally NOT fused here (#3803 regressed BF16
@@ -564,7 +565,14 @@ class Qwen3Attention(nn.Module):
             attention_mask=attention_mask,
             softmax_scale=self.scaling / self.k_scale_float,
             sink=None,
-            update_cache=False,
+            # COVEX_QWEN3_INKERNEL_KV_WRITE=1: let the kernel write the new K/V in place
+            # (as Llama 3 decode does) instead of returning them for a separate
+            # index_put_ on the whole cache tensor, which XLA can lower to a
+            # full-cache scatter (vllm-neuron #40 measured 30.9 GB/step on MiMo).
+            update_cache=_INKERNEL_KV,
+            kv_cache_update_idx=(
+                slot_mapping.view(B, S_decode).to(torch.uint32) if _INKERNEL_KV else None
+            ),
             W_out=self.o_proj_weight / self.v_scale_float,
             bias_out=None,
             transposed_out=False,
@@ -578,6 +586,14 @@ class Qwen3Attention(nn.Module):
             pos_ids=dyn_fa_pos_ids,
             max_context_len=dyn_fa_max_ctx,
         )
+
+        if _INKERNEL_KV:
+            output = _res
+            if self.world_size > 1:
+                self.tp_group.all_reduce(output)
+            return output
+
+        output, K_new, V_new = _res
 
         # Manual KV cache update
         block_indices, position_indices = paged_slot_indices(
