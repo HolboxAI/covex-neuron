@@ -762,3 +762,26 @@ def get_max_num_batched_tokens(
         min(configured_value, max_model_len).
     """
     return min(configured_value, max_model_len)
+
+
+def canonical_prefill_max_query_len(
+    max_query_len: int, padded_total_tokens: int, decode_token_threshold: int, multi_prefill: bool
+) -> int:
+    """``max_query_len`` to put in attention metadata for a prefill step.
+
+    Models only compare it (``> decode_token_threshold`` for prefill, ``== 1`` for decode layouts), but torch.compile
+    guards on the exact integer. With several prefills packed into one step the longest padded request changes with
+    every mix of prompt lengths, so each new value retraced the graph and tripped ``fail_on_recompile``. For a packed
+    prefill step the value is therefore the step's padded total (the bucket): one value per bucket, identical in warmup
+    and at runtime. Decode steps and single-prefill steps (``multi_prefill`` False) are returned unchanged.
+
+    >>> canonical_prefill_max_query_len(37, 128, 1, True)
+    128
+    >>> canonical_prefill_max_query_len(128, 128, 1, False)
+    128
+    >>> canonical_prefill_max_query_len(1, 8, 1, True)
+    1
+    """
+    if multi_prefill and max_query_len > decode_token_threshold:
+        return padded_total_tokens
+    return max_query_len

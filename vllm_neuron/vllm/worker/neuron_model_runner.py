@@ -4241,11 +4241,20 @@ class NeuronModelRunner(KVConnectorModelRunnerMixin, NeuronECConnectorModelRunne
         # Compute cached_seq_len for segmented prefill
         cached_seq_len = self._compute_cached_seq_len()
 
-        # Build attention metadata
+        # Build attention metadata. Packed prefill (max_prefills_per_batch > 1): one max_query_len per bucket, so the
+        # compiled graph's guard holds for every mix of prompt lengths (see canonical_prefill_max_query_len).
+        from vllm_neuron.utils.bucket_utils import canonical_prefill_max_query_len
+
+        meta_max_query_len = canonical_prefill_max_query_len(
+            max_num_scheduled_tokens_padded,
+            total_num_scheduled_tokens_padded,
+            self._decode_token_threshold(),
+            getattr(self, "max_prefills_per_batch", 1) > 1,
+        )
         attn_metadata = self._build_attention_metadata(
             padded_num_reqs,
             total_num_scheduled_tokens_padded,  # Includes decode padding
-            max_num_scheduled_tokens_padded,
+            meta_max_query_len,
             max_num_draft_tokens,
             cached_seq_len,
             max_decode_ctx_len=max_decode_ctx_len,
@@ -5862,8 +5871,16 @@ class NeuronModelRunner(KVConnectorModelRunnerMixin, NeuronECConnectorModelRunne
             else:
                 slot_mapping = torch.arange(num_tokens, dtype=torch.int64).to(device)
 
-            # max_query_len: for prefill = bucket_size, for decode = 1
-            max_query_len = num_tokens // num_reqs
+            # max_query_len: for prefill = bucket_size, for decode = 1; packed prefill warms up the same canonical
+            # value the runtime uses (canonical_prefill_max_query_len), so the guard matches at serve time.
+            from vllm_neuron.utils.bucket_utils import canonical_prefill_max_query_len
+
+            max_query_len = canonical_prefill_max_query_len(
+                num_tokens // num_reqs,
+                num_tokens,
+                decode_token_threshold,
+                getattr(self, "max_prefills_per_batch", 1) > 1,
+            )
 
             attn_metadata_i = {
                 "block_table_tensor": block_table_tensor,

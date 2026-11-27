@@ -957,3 +957,56 @@ def test_q32_summary_requested_exploratory_arm_must_have_results(tmp_path):
     r = subprocess.run(["python3", str(ROOT / "benchmarks/q32/summarize.py"), str(tmp_path), "--arms", "q32-U q32-T q32-K",
                         "--windows", "1"], capture_output=True, text=True)
     assert r.returncode == 0, r.stdout                          # not requested -> not required
+
+
+def _ds():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("ds", ROOT / "benchmarks/q32/decode_step.py")
+    m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+    return m
+
+
+def test_decode_step_counts_time_once_and_splits_allreduce():
+    ds = _ds(); L = 2
+    def rank(offset):   # 8 decode executions of 1000 ns; each: attn 0-200, AR 200-300 (100 exposed), mlp 300-700,
+        out = []          # AR 650-750 (50 overlapped with mlp, 50 exposed), then the same for layer 2 shifted by 0 (L=2)
+        for i in range(8):
+            s = i * 2000 + offset
+            out.append(("decode_graph", s, 1000, 0))
+            for base in (0, 500):
+                out += [("attention_tkg", s + base, 200, 1), ("cc_all_reduce", s + base + 200, 50, 1),
+                        ("mlp_tkg", s + base + 250, 150, 1), ("cc_all_reduce", s + base + 380, 40, 1)]
+        return out
+    ranks = {r: rank(offset=r * 10) for r in range(8)}            # ranks skewed by 10 ns each
+    out = ds.analyze(ranks, L)
+    assert abs(out["step_ms"] - (1000 + 70) / 1e6) < 1e-12, out     # once across ranks: 1000 + max skew 70, not 8x
+    assert out["attn_ms"] != "unknown" and out["mlp_ms"] != "unknown", out
+    assert out["exposed_ms"] >= 0 and out["overlap_ms"] >= 0
+
+
+def test_decode_step_marks_unknown_when_trace_cannot_resolve():
+    ds = _ds()
+    ranks = {r: [("decode_graph", i * 2000, 1000, 0) for i in range(8)] + [("matmul", i * 2000 + 10, 500, 1) for i in range(8)]
+             for r in range(8)}
+    out = ds.analyze(ranks, 64)
+    assert out["exposed_ms"] == "unknown" and "no slice name matches a collective" in out["note"]
+    ranks = {r: [("decode_graph", i * 2000, 1000, 0) for i in range(8)] + [("cc_all_reduce", i * 2000 + 10, 5, 1) for i in range(8)]
+             for r in range(8)}
+    out = ds.analyze(ranks, 64)
+    assert out["attn_ms"] == "unknown" and "split unknown" in out["note"], out
+
+
+def test_packed_prefill_max_query_len_is_one_value_per_bucket():
+    """emb-C crashed with fail_on_recompile: the compiled guard was max_query_len == 128 and packed steps passed the
+    longest request's padded length instead. Every packed prefill in a bucket must carry the same value; stock
+    (single prefill) and decode must be unchanged."""
+    import importlib.util, types, sys as _s
+    src = (ROOT / "vllm_neuron/utils/bucket_utils.py").read_text()
+    fn_src = src[src.index("def canonical_prefill_max_query_len"):]
+    ns = {}; exec(fn_src, ns); f = ns["canonical_prefill_max_query_len"]
+    bucket = 128
+    assert {f(m, bucket, 1, True) for m in (17, 37, 64, 100, 128)} == {bucket}     # any mix -> one value
+    assert f(128, 128, 1, False) == 128 and f(37, 128, 1, False) == 37             # single prefill unchanged
+    assert f(1, 8, 1, True) == 1 and f(3, 8, 3, True) == 3                         # decode unchanged (incl. spec)
+    runner = (ROOT / "vllm_neuron/vllm/worker/neuron_model_runner.py").read_text()
+    assert runner.count("canonical_prefill_max_query_len(") == 2, "runtime and warmup must use the same rule"
