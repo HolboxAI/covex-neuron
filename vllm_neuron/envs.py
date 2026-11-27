@@ -46,6 +46,9 @@ if TYPE_CHECKING:
     VLLM_NEURON_SWITCH_CC: bool = False
     VLLM_NEURON_MIN_KV_BUDGET_GIB: float = 1.0
     VLLM_NEURON_KV_GMU_BUDGET_CAP_FRACTION: float = 0.30
+    # COVEX: Qwen3-VL vision MLP on the nkilib NKI kernel (Dax's ASR port), and norm2 folded into it.
+    COVEX_VL_VISION_MLP_NKI: bool = False
+    COVEX_VL_VISION_LN_IN_MLP: bool = False
     # COVEX: decode attention stops after the longest real context in the batch
     # (nkilib dynamic FA early exit). Off by default; Qwen3 and Llama 3 decode.
     COVEX_DECODE_DYNAMIC_FA: bool = False
@@ -343,6 +346,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     "COVEX_QWEN3_INKERNEL_KV_WRITE": lambda: (
         maybe_convert_bool(os.getenv("COVEX_QWEN3_INKERNEL_KV_WRITE")) or False
+    ),
+    "COVEX_VL_VISION_MLP_NKI": lambda: (
+        maybe_convert_bool(os.getenv("COVEX_VL_VISION_MLP_NKI")) or False
+    ),
+    "COVEX_VL_VISION_LN_IN_MLP": lambda: (
+        maybe_convert_bool(os.getenv("COVEX_VL_VISION_LN_IN_MLP")) or False
     ),
     "VLLM_NEURON_KV_GMU_BUDGET_CAP_FRACTION": lambda: (
         maybe_convert_float(os.getenv("VLLM_NEURON_KV_GMU_BUDGET_CAP_FRACTION"))

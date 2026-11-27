@@ -32,7 +32,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+import vllm_neuron.envs as envs
 import vllm_neuron.functional as NF
+from nkilib.core.utils.common_types import ActFnType, NormType
 from vllm_neuron.parallel.neuron_parallel_state import get_neuron_encoder_tp_group
 from vllm_neuron.utils.weight_loader import set_weight_loader, sharding_weight_loader
 from vllm_neuron.utils.dynamo_graph import allow_in_graph_cacheable
@@ -61,6 +63,13 @@ def gelu(x: torch.Tensor) -> torch.Tensor:
 # ---------------------------------------------------------------------------
 # MLP
 # ---------------------------------------------------------------------------
+
+
+# COVEX_VL_VISION_MLP_NKI=1: run the vision MLP (fc1 -> erf GELU -> fc2) through the nkilib NKI MLP kernel
+# (skip_gate + GELU, fc1 bias folded in), the same port Dax made for the Qwen3-ASR audio encoder.
+# COVEX_VL_VISION_LN_IN_MLP=1 (needs the MLP flag) also folds the block's norm2 LayerNorm into that kernel call.
+_VL_MLP_NKI = envs.COVEX_VL_VISION_MLP_NKI
+_VL_LN_IN_MLP = _VL_MLP_NKI and envs.COVEX_VL_VISION_LN_IN_MLP
 
 
 class Qwen3VLVisionMLP(nn.Module):
@@ -136,8 +145,10 @@ class Qwen3VLVisionMLP(nn.Module):
             ),
         )
 
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        """MLP forward: fc1 → GELU → fc2 → all-reduce → + bias.
+    def forward(
+        self, hidden_states: torch.Tensor, pre_norm: nn.LayerNorm | None = None
+    ) -> torch.Tensor:
+        """MLP forward: [LayerNorm →] fc1 → GELU → fc2 → all-reduce → + bias.
 
         Matmul broadcasts over leading dims, so this works with any batch
         shape (e.g., ``[num_blocks, block_size, hidden_size]``).
@@ -148,9 +159,35 @@ class Qwen3VLVisionMLP(nn.Module):
         Returns:
             ``[..., hidden_size]`` — same leading dims as input.
         """
-        output = hidden_states @ self.fc1_weight + self.fc1_bias
-        output = gelu(output)  # <-- MODEL-SPECIFIC: erf GELU for Neuron traceability
-        output = output @ self.fc2_weight
+        if _VL_MLP_NKI:
+            out_shape = hidden_states.shape
+            hidden_size = out_shape[-1]
+            output = NF.mlp(
+                hidden_states.reshape(-1, hidden_size),
+                # gate_w is unused with skip_gate=True; pass fc1 so the eligibility gate reads the right dims.
+                self.fc1_weight,
+                self.fc1_weight,
+                self.fc2_weight,
+                skip_gate=True,
+                act_fn=ActFnType.GELU,
+                up_b=self.fc1_bias.unsqueeze(0),
+                **(
+                    dict(
+                        norm_type=NormType.LAYER_NORM,
+                        ln_w=pre_norm.weight.view(1, -1),
+                        norm_b=pre_norm.bias.view(1, -1),
+                        eps=pre_norm.eps,
+                    )
+                    if pre_norm is not None
+                    else dict(norm_type=NormType.NO_NORM)
+                ),
+            ).reshape(out_shape)
+        else:
+            if pre_norm is not None:
+                hidden_states = pre_norm(hidden_states)
+            output = hidden_states @ self.fc1_weight + self.fc1_bias
+            output = gelu(output)  # <-- MODEL-SPECIFIC: erf GELU for Neuron traceability
+            output = output @ self.fc2_weight
 
         # >>> PARALLELISM: All-reduce across vision TP ranks <<<
         if self.world_size > 1:
@@ -415,7 +452,10 @@ class Qwen3VLVisionBlock(nn.Module):
         hidden_states = hidden_states + self.attn(
             self.norm1(hidden_states), cos, sin, bound_min, bound_max
         )
-        hidden_states = hidden_states + self.mlp(self.norm2(hidden_states))
+        if _VL_LN_IN_MLP:
+            hidden_states = hidden_states + self.mlp(hidden_states, pre_norm=self.norm2)
+        else:
+            hidden_states = hidden_states + self.mlp(self.norm2(hidden_states))
         return hidden_states
 
 
