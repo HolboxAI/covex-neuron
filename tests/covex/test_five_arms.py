@@ -1056,3 +1056,65 @@ def test_packed_prefill_bounds_are_block_diagonal_causal():
     assert all(set(range(max(t - positions[t], 0), t + 1)) == set(range(t + 1)) for t in range(7))
     runner = (ROOT / "vllm_neuron/vllm/worker/neuron_model_runner.py").read_text()
     assert runner.count('"packed_prefill": getattr(self, "max_prefills_per_batch", 1) > 1') == 2
+
+
+def test_vector_match_rejects_truncated_rescaled_nonfinite_and_wrong_prompt():
+    """Astra: the cosine-only checker passed a truncated vector and a rescaled vector."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("cl", ROOT / "benchmarks/five/clients.py")
+    cl = importlib.util.module_from_spec(spec)
+    import sys as _s, types
+    _s.modules.setdefault("httpx", types.ModuleType("httpx"))   # client import only; no network here
+    spec.loader.exec_module(cl)
+    v = [[0.1 * (i + 1) + 0.01 * j for j in range(16)] for i in range(4)]
+    ref = {"vectors": v, "input_ids": ["a", "b", "c", "d"]}
+    assert cl.vector_match(ref, {"vectors": [list(x) for x in v], "input_ids": ["a", "b", "c", "d"]})["pass"]
+    trunc = {"vectors": [x[:15] for x in v], "input_ids": ref["input_ids"]}
+    assert not cl.vector_match(ref, trunc)["pass"]                                   # truncated
+    scaled = {"vectors": [[1.1 * y for y in x] for x in v], "input_ids": ref["input_ids"]}
+    r = cl.vector_match(ref, scaled); assert not r["pass"] and "norm" in r["why"], r   # rescaled (cosine = 1.0)
+    nan = {"vectors": [x[:-1] + [float("nan")] for x in v], "input_ids": ref["input_ids"]}
+    assert not cl.vector_match(ref, nan)["pass"]                                     # non-finite
+    swapped = {"vectors": [list(x) for x in v], "input_ids": ["b", "a", "c", "d"]}
+    assert not cl.vector_match(ref, swapped)["pass"]                                 # different prompts
+
+
+def test_decode_step_matches_ranks_by_time_not_position():
+    """Astra's repro: 8 ranks of 1 ms decode executions; one rank missed an early event and caught an extra late one.
+    List-position pairing reported 11 ms. Time matching must report ~1 ms (or unknown), never a cross-step span."""
+    ds = _ds()
+    def rank(skip_first=False, extra_late=False):
+        z = []
+        for i in range(12):
+            if skip_first and i == 0:
+                continue
+            t = 10_000_000 * i                                     # 10 ms period, 1 ms executions
+            z += [("decode", t, 1_000_000, 0), ("matmul", t, 500_000, 1), ("cc_all_reduce", t + 500_000, 200_000, 1),
+                  ("matmul", t + 700_000, 300_000, 1)]
+        if extra_late:
+            t = 10_000_000 * 12; z += [("decode", t, 1_000_000, 0), ("matmul", t, 1_000_000, 1)]
+        return z
+    ranks = {r: rank() for r in range(8)}
+    ranks[3] = rank(skip_first=True, extra_late=True)
+    out = ds.analyze(ranks, 1)
+    assert "error" not in out and abs(out["step_ms"] - 1.0) < 1e-9, out
+    assert abs(out["idle_before_next_ms"] - 9.0) < 1e-9, out                 # 10 ms period - 1 ms step
+    # clocks so far apart that no step lines up -> unknown, not a fabricated number
+    skewed = {r: [(n, ts + r * 3_000_000, d, dep) for n, ts, d, dep in rank()] for r in range(8)}
+    assert "error" in ds.analyze(skewed, 1)
+
+
+def test_q32_summary_request_level_p90_and_limits(tmp_path):
+    def bench(n, tps, ttft_s, itl_s):
+        return {"num_prompts": n, "completed": n, "failed": 0, "total_output_tokens": n * 256, "total_input_tokens": n * 1024,
+                "output_throughput": tps, "median_tpot_ms": 10.0, "median_ttft_ms": 50.0, "p90_ttft_ms": 1.0,
+                "ttfts": [ttft_s] * (n - 1) + [ttft_s * 10], "itls": [[itl_s] * 255 for _ in range(n)]}
+    for arm, tps, tt in (("q32-U", 100.0, 0.1), ("q32-T", 100.0, 0.1), ("q32-K", 120.0, 0.5)):
+        for c, n in (("c1", 8), ("c8", 32)):
+            (tmp_path / f"{arm}-{c}-w1.json").write_text(json.dumps(bench(n, tps, tt, 0.02)))
+    r = subprocess.run(["python3", str(ROOT / "benchmarks/q32/summarize.py"), str(tmp_path), "--arms", "q32-U q32-T q32-K",
+                        "--windows", "1"], capture_output=True, text=True)
+    k_c8 = next(l for l in r.stdout.splitlines() if l.startswith("| q32-K | c8 |"))
+    # q32-K c8: 32 requests, one slow (5 s): the request-level p90 is 0.5 s, the outlier is the p97 -> PASS at 2 s
+    assert "0.500 s / 20.00 ms" in k_c8 and "| PASS |" in k_c8, k_c8
+    assert "| q32-K | c8 | 120.0 | tested points only" in r.stdout, r.stdout

@@ -71,7 +71,7 @@ llm() { # arm conc prompts tag -> bench status kept
   pin $1 vllm bench serve --backend vllm --base-url "http://127.0.0.1:${PORT[$1]}" --model m --tokenizer "$TOK" \
     --dataset-name random --random-input-len 1024 --random-output-len 256 --ignore-eos \
     --max-concurrency "$2" --num-prompts "$3" --seed 1 --percentile-metrics ttft,tpot,itl,e2el --metric-percentiles 50,90 \
-    --save-result --result-dir results --result-filename "$1-$4.json" > "logs/$1-$4.bench.log" 2>&1
+    --save-result --save-detailed --result-dir results --result-filename "$1-$4.json" > "logs/$1-$4.bench.log" 2>&1
   local rc=$?; status $1 "bench-$4" "$([ $rc = 0 ] && echo OK || echo "FAILED rc=$rc")"; return $rc
 }
 # --- one short, separately tagged profile per arm on the warmed workload; evidence saved immediately -----------------

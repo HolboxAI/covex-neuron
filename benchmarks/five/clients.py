@@ -41,7 +41,10 @@ def emb(port, path, n, conc, out):
     wall, lat, outs = asyncio.run(run_pool(n, conc, make))
     keep = n if os.environ.get("EMB_ALL_VECTORS") == "1" else min(20, n)   # sweep checks cosine on EVERY vector
     vecs = [outs[i]["data"][0]["embedding"] for i in range(keep)]
-    json.dump(summary(n, conc, wall, lat, {"seq_per_s": round(n / wall, 3), "vectors": vecs}), open(out, "w"))
+    import hashlib   # prompt identity per vector, so a match compares the same prompt's vectors
+    ids = [hashlib.sha256(texts[i % len(texts)].encode()).hexdigest()[:16] for i in range(keep)]
+    json.dump(summary(n, conc, wall, lat, {"seq_per_s": round(n / wall, 3), "vectors": vecs, "input_ids": ids}),
+              open(out, "w"))
 
 def vl(port, d, n, conc, out):
     d = Path(d); man = json.load(open(d / "manifest.json"))
@@ -98,15 +101,41 @@ def cachecheck(port, out, conc="1", gen_tokens="32"):
                "token_ids": ids}, open(out, "w"))
 
 
+def vector_match(A, B, cos_min=None, norm_tol=1e-3):
+    """Embedding agreement. Cosine alone accepts a truncated or rescaled vector (Astra), so every vector must also have
+    the reference's exact dimension, only finite values, a norm within norm_tol (relative), and the same prompt."""
+    import math
+    thr = float(os.environ.get("EMB_COS_MIN", "0.9999")) if cos_min is None else cos_min
+    va, vb = A.get("vectors", []), B.get("vectors", [])
+    why = []
+    if not va or len(va) != len(vb):
+        why.append(f"vector count {len(va)} vs {len(vb)}")
+    if A.get("input_ids") is not None or B.get("input_ids") is not None:
+        if A.get("input_ids") != B.get("input_ids"):
+            why.append("prompt identity differs")
+    cos_vals, worst_norm = [], 0.0
+    for i, (u, v) in enumerate(zip(va, vb)):
+        if len(u) != len(v):
+            why.append(f"vector {i}: dimension {len(v)} vs {len(u)}"); break
+        if not all(math.isfinite(x) for x in u) or not all(math.isfinite(x) for x in v):
+            why.append(f"vector {i}: non-finite values"); break
+        nu, nv = math.sqrt(sum(x * x for x in u)), math.sqrt(sum(x * x for x in v))
+        if nu == 0 or nv == 0:
+            why.append(f"vector {i}: zero norm"); break
+        worst_norm = max(worst_norm, abs(nv - nu) / nu)
+        cos_vals.append(sum(x * y for x, y in zip(u, v)) / (nu * nv))
+    if worst_norm > norm_tol:
+        why.append(f"norm differs by {worst_norm:.2e} (> {norm_tol})")
+    if cos_vals and min(cos_vals) < thr:
+        why.append(f"min cosine {min(cos_vals):.6f} < {thr}")
+    return {"min_cosine": round(min(cos_vals), 6) if cos_vals else None, "max_norm_rel_diff": round(worst_norm, 6),
+            "n": len(cos_vals), "pass": not why, "why": "; ".join(why)}
+
+
 def match(a, b):
     A, B = json.load(open(a)), json.load(open(b))
     if "vectors" in A:
-        import math
-        cos = [sum(x * y for x, y in zip(u, v)) / (math.sqrt(sum(x * x for x in u)) * math.sqrt(sum(y * y for y in v)))
-               for u, v in zip(A["vectors"], B["vectors"])]
-        thr = float(os.environ.get("EMB_COS_MIN", "0.9999"))   # packing sweep uses 0.999 on every vector
-        ok = len(A["vectors"]) == len(B["vectors"]) > 0 and min(cos) >= thr
-        print(json.dumps({"min_cosine": round(min(cos), 6) if cos else None, "n": len(cos), "pass": ok}))
+        print(json.dumps(vector_match(A, B)))
     elif "token_ids" in A or "token_ids" in B:
         # exact token-id agreement; both sides must hold every prompt with exactly gen_tokens ids
         a_, b_, g = A.get("token_ids", []), B.get("token_ids", []), A.get("gen_tokens")

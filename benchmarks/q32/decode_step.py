@@ -42,24 +42,42 @@ def subtract_len(a, b):
 
 
 def pick_steps(ranks):
-    """ranks: {rank: [(name, ts, dur, depth)]}. Decode executions = the most frequent depth-0 slice name on rank 0.
-    Returns the step index chosen (median duration among the middle half) and per-rank (start, end) of that step."""
+    """Match ONE decode execution across all ranks by time, never by list position (a rank that missed an early event
+    shifted list pairing and turned 1 ms steps into an 11 ms "step"). Decode executions = the most frequent depth-0
+    slice name on the reference rank. For a candidate on the reference rank, every other rank must have exactly one
+    decode execution starting within half a step of it; otherwise that candidate is ambiguous. Returns
+    (k, {rank: (start, end)}, {rank: idle_before_next}) for the median-duration unambiguous candidate in the middle half,
+    or (None, reason, None)."""
     r0 = min(ranks)
     top = [x for x in ranks[r0] if x[3] == 0]
     if not top:
-        return None, "no top-level execution slices"
+        return None, "no top-level execution slices", None
     names = {}
     for n, *_ in top:
         names[n] = names.get(n, 0) + 1
     dec = max(names, key=names.get)
     seqs = {r: sorted((x for x in v if x[3] == 0 and x[0] == dec), key=lambda x: x[1]) for r, v in ranks.items()}
-    n = min(len(s) for s in seqs.values())
-    if n < 4:
-        return None, f"only {n} decode executions on some rank"
-    mid = list(range(n // 4, 3 * n // 4))
-    durs = [max(seqs[r][i][1] + seqs[r][i][2] for r in seqs) - min(seqs[r][i][1] for r in seqs) for i in mid]
-    k = mid[durs.index(sorted(durs)[len(durs) // 2])]
-    return k, {r: (seqs[r][k][1], seqs[r][k][1] + seqs[r][k][2]) for r in seqs}
+    ref = seqs[r0]
+    if len(ref) < 4:
+        return None, f"only {len(ref)} decode executions on rank {r0}", None
+    tol = 0.5 * sorted(x[2] for x in ref)[len(ref) // 2]
+    cands = []
+    for k in range(len(ref) // 4, 3 * len(ref) // 4):
+        s0 = ref[k][1]; win, idle, ok = {}, {}, True
+        for r, seq in seqs.items():
+            hits = [i for i, x in enumerate(seq) if abs(x[1] - s0) <= tol]
+            if len(hits) != 1:
+                ok = False; break
+            i = hits[0]; x = seq[i]
+            win[r] = (x[1], x[1] + x[2])
+            idle[r] = (seq[i + 1][1] - (x[1] + x[2])) if i + 1 < len(seq) else None
+        if ok:
+            cands.append((max(e for _, e in win.values()) - min(s for s, _ in win.values()), k, win, idle))
+    if not cands:
+        return None, "no decode execution could be matched unambiguously across all ranks", None
+    cands.sort(key=lambda c: c[0])
+    _, k, win, idle = cands[len(cands) // 2]
+    return k, win, idle
 
 
 def leaves(v, s, e):
@@ -75,7 +93,7 @@ def leaves(v, s, e):
 def analyze(ranks, layers, tp=8):
     if len(ranks) != tp:   # every TP rank, or no communication claim at all
         return {"error": f"{len(ranks)} rank traces, expected {tp}; communication split unknown"}
-    k, win = pick_steps(ranks)
+    k, win, idle = pick_steps(ranks)
     if k is None:
         return {"error": win}
     t0, t1 = min(s for s, _ in win.values()), max(e for _, e in win.values())
@@ -89,6 +107,10 @@ def analyze(ranks, layers, tp=8):
             elif not IDLE.search(name or ""):
                 comp.append(iv)
     out = {"step_index": k, "step_ms": (t1 - t0) / 1e6, "ranks": len(ranks)}
+    gaps = [g for g in idle.values() if g is not None]
+    # device idle before the next decode step = time the device waited for the host to enqueue it (sampling ->
+    # next enqueue); the host side itself needs a system/host trace, so this is the device-observed upper bound
+    out["idle_before_next_ms"] = (max(gaps) / 1e6) if len(gaps) == len(idle) else "unknown"
     missing = [r for r in ranks if not per_rank_coll.get(r)]
     if coll and missing:
         out.update(exposed_ms="unknown", attn_ms="unknown", mlp_ms="unknown", overlap_ms="unknown",
@@ -139,12 +161,12 @@ if __name__ == "__main__":
     tp = int(a[a.index("--tp") + 1]) if "--tp" in a else 8
     arms = [x for x in a if "=" in x]
     print("| Arm | Ranks | Step (ms, once across ranks) | Exposed all-reduce wait (ms) | after attention | after MLP | "
-          "Comm overlapped with compute (ms) | Note |")
-    print("|---|---|---|---|---|---|---|---|")
+          "Comm overlapped with compute (ms) | Device idle before next step (ms) | Note |")
+    print("|---|---|---|---|---|---|---|---|---|")
     for spec in arms:
         arm, d = spec.split("=", 1)
         r = analyze(load_dir(d), layers, tp)
         if "error" in r:
-            print(f"| {arm} | – | unknown | unknown | unknown | unknown | unknown | {r['error']} |"); continue
+            print(f"| {arm} | – | unknown | unknown | unknown | unknown | unknown | unknown | {r['error']} |"); continue
         print(f"| {arm} | {r['ranks']} | {fmt(r['step_ms'])} | {fmt(r['exposed_ms'])} | {fmt(r['attn_ms'])} | "
-              f"{fmt(r['mlp_ms'])} | {fmt(r['overlap_ms'])} | {r.get('note', '')} |")
+              f"{fmt(r['mlp_ms'])} | {fmt(r['overlap_ms'])} | {fmt(r['idle_before_next_ms'])} | {r.get('note', '')} |")

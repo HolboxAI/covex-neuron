@@ -30,15 +30,36 @@ def windows(arm, c, n):
     return ds, bad
 
 
+LIMITS = {"ttft_p90_s": 2.0, "tpot_p90_ms": 50.0}   # pre-registered before run 2 (user + Astra)
+
+
+def p90(xs):
+    xs = sorted(xs)
+    return xs[max(0, int(-(-0.9 * len(xs) // 1)) - 1)] if xs else None
+
+
+def request_p90s(ds):
+    """p90 TTFT (s) and TPOT (ms) over INDIVIDUAL requests pooled across windows (vllm bench --save-detailed:
+    per-request `ttfts` and `itls`). Falls back to None when per-request data is absent; never a median of p90s."""
+    tt, tp = [], []
+    for d in ds:
+        if not d or not isinstance(d.get("ttfts"), list) or not isinstance(d.get("itls"), list):
+            return None, None
+        tt += [x for x in d["ttfts"] if isinstance(x, (int, float))]
+        tp += [1000 * sum(x) / len(x) for x in d["itls"] if isinstance(x, list) and x]
+    return p90(tt), p90(tp)
+
+
 def med(ds, k):
     v = [d[k] for d in ds if d and d.get(k) is not None]
     return round(statistics.median(v), 2) if v else None
 
 
 print("## Per arm (unprofiled windows)\n")
-print("| Arm | Load | out tok/s per window | median tok/s | completed | TPOT p50 / p90 ms | TTFT p50 / p90 ms | Status |")
-print("|---|---|---|---|---|---|---|---|")
-summary = {}
+print("| Arm | Load | out tok/s per window | median tok/s | completed | TPOT p50 / p90 ms (window medians) | "
+      "TTFT p50 / p90 ms (window medians) | request p90 TTFT / TPOT | limits (2 s / 50 ms) | Status |")
+print("|---|---|---|---|---|---|---|---|---|---|")
+summary, limits = {}, {}
 for arm in ARMS:
     for c, n in LOADS:
         ds, bad = windows(arm, c, n)
@@ -46,8 +67,14 @@ for arm in ARMS:
         per = ", ".join(f"{d['output_throughput']:.1f}" if d and isinstance(d.get("output_throughput"), (int, float)) else "invalid"
                         for d in ds)
         done = sum((d or {}).get("completed", 0) for d in ds)
+        rt, rp = request_p90s(ds)
+        lim = ("unknown (no per-request data)" if rt is None else
+               "PASS" if rt <= LIMITS["ttft_p90_s"] and rp <= LIMITS["tpot_p90_ms"] else "FAIL")
+        limits[(arm, c)] = lim
+        rq = "–" if rt is None else f"{rt:.3f} s / {rp:.2f} ms"
         print(f"| {arm} | {c} | {per} | {summary[(arm, c)][0] or '–'} | {done}/{n * W} | {med(ds, 'median_tpot_ms')} / "
-              f"{med(ds, 'p90_tpot_ms')} | {med(ds, 'median_ttft_ms')} / {med(ds, 'p90_ttft_ms')} | {'; '.join(bad) or 'complete'} |")
+              f"{med(ds, 'p90_tpot_ms')} | {med(ds, 'median_ttft_ms')} / {med(ds, 'p90_ttft_ms')} | {rq} | {lim} | "
+              f"{'; '.join(bad) or 'complete'} |")
 
 print("\n## Comparisons (median output tok/s; ratio only when complete and correct)\n")
 print("| Arm | vs | Load | Arm tok/s | Ref tok/s | Ratio | Status |\n|---|---|---|---|---|---|---|")
@@ -79,6 +106,15 @@ for arm in [x for x in ARMS if x in EXPLORATORY]:
         bad = summary[(arm, c)][1]
         if bad or summary[(arm, c)][0] is None:
             incomplete.append(f"{arm} (requested exploratory arm) {c}: " + ("; ".join(bad) or "no valid windows"))
+print("\n## Best passing tested point per arm (request-level p90 within the pre-registered limits)\n")
+print("| Arm | Load | median tok/s | Note |\n|---|---|---|---|")
+for arm in ARMS:
+    ok = [(summary[(arm, c)][0], c) for c, _ in LOADS if limits.get((arm, c)) == "PASS" and summary[(arm, c)][0]
+          and not summary[(arm, c)][1]]
+    if ok:
+        v, c = max(ok); print(f"| {arm} | {c} | {v} | tested points only (c1, c8); not a saturation sweep |")
+    else:
+        print(f"| {arm} | – | – | no tested point passes the limits with complete windows |")
 for x in incomplete:
     print(f"INCOMPLETE (required): {x}")
 missing = [p for p in REQUIRED if p[0] not in ARMS or p[1] not in ARMS]
