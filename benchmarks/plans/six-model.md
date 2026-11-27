@@ -17,11 +17,11 @@ Every row reports **C vs T**. C vs R is shown separately and labeled.
 
 | Model | Parallelism | Config (T and C) | COVEX flags (C) | Workload | Expected C vs T (estimate) | ≥2x plausible? |
 |---|---|---|---|---|---|---|
-| Llama-3.1-8B | TP4, 1 chip | max 8192, block 16, cap 0.6 | #77 (in T too; it is a bug fix), `COVEX_DECODE_DYNAMIC_FA`, nki tile 2048 | 1k/256 and 8k/1k, c1/4/16/32 | 1.1–1.4x | No (only vs R, through #77) |
-| Qwen3-32B | TP8, 2 chips | max 32768, cap 0.8 | `COVEX_DECODE_DYNAMIC_FA`, `COVEX_QWEN3_INKERNEL_KV_WRITE`, nki tile 2048 | 1k/512, c1/4/8/12 | 1.4–1.7x | Only if the HLO shows the KV write is a full-cache copy |
-| Qwen3-VL-32B | TP4, 1 chip | max 8192, block 16 | vision MLP NKI port + LN fold (**to be written**), text dynFA + tile | fixed 200-image set + text, c1/4/8 | TTFT 1.3–2x, throughput 1.2–1.6x | Image TTFT only |
-| Qwen3-Embedding-8B | TP8, 2 chips | max 4096, recipe buckets | `max_prefills_per_batch` 4 | 64 / 256 / 1024-token inputs, c32 | 1.7–2.8x at 64 tokens; about 1.0–1.2x at 256 and 1024 | Short inputs only |
-| Qwen3-ASR-1.7B | TP8, 2 chips | S2 config (buckets 128–1024, 16 seqs) | Dax MLP + LN fold, two prefills per step, 128-step buckets | LibriSpeech, c1/8/16 | 1.3–1.6x per server | No (about 2x per chip with TP4) |
+| Llama-3.1-8B | TP4, 1 chip | max 8192, block 16, cap 0.6 (c32 KV 34.4 GB < 51.8 GB budget). Extra arm **T-no77** (TP4, without #77) shows the stock bug; R (TP8 recipe) does not trigger it | #77 (in T too; it is a bug fix), `COVEX_DECODE_DYNAMIC_FA`, nki tile 2048 | 1k/256 and 8k/1k, c1/4/16/32 | 1.1–1.4x | No (only vs R, through #77) |
+| Qwen3-32B | TP8, 2 chips | max 32768, cap 0.8, block 128 in T and C (tile 2048 relies on nkilib block resize). c12 KV = 103.1 GB vs 107.3 GB budget, so the c12 cell runs only if the startup log admits 12; otherwise c12 runs at max 16384 | `COVEX_DECODE_DYNAMIC_FA`, `COVEX_QWEN3_INKERNEL_KV_WRITE`, nki tile 2048 | 1k/512, c1/4/8 (+c12 per the KV log) | 1.4–1.7x | Only if the HLO shows the KV write is a full-cache copy |
+| Qwen3-VL-32B | TP4, 1 chip | max 8192, block 16 (~20 GB for KV; c8 at 8K needs ~17 GB, so check the KV-pool log before keeping c8) | vision MLP NKI port + LN fold (**to be written**), text dynFA + tile | fixed 200-image set + text, c1/4/8 | TTFT 1.3–2x, throughput 1.2–1.6x | Image TTFT only |
+| Qwen3-Embedding-8B | TP8, 2 chips | max 4096, recipe buckets (R = T, so no R arm) | `max_prefills_per_batch` 16 for 64-token inputs, 8 for 256 | 64 / 256 / 1024-token inputs, c32 | about 1.5–2.4x at 64 tokens (MFU 30–50%); about 1.0–1.2x at 256 and 1024 | Short inputs only |
+| Qwen3-ASR-1.7B | TP8, 2 chips; plus per-chip arms **C-T4** (TP4, 1 chip) and **C-LNC1** (TP4 × DP2 at LNC=1, 1 chip; #69 Voxtral +16–21%) | S2 config (buckets 128–1024, 16 seqs) | Dax MLP + LN fold, two prefills per step, 128-step buckets | LibriSpeech, c1/8/16 | 1.3–1.6x per server; per chip is measured by C-T4 and C-LNC1 | No per server; per chip, to be measured |
 | GPT-OSS-20B | TP8, 2 chips | max 16384 | dynFA (full-attention layers only) | 1k/256, c1/8/16 | 1.0–1.15x | No. Control row. |
 
 So ≥2x across all six is **not** expected from this code. It is plausible for Embedding at short inputs, for Llama only against recipe stock, and for Qwen3-32B only if the KV-write copy turns out large. The run measures every stage, so the next levers can be chosen from data.
@@ -53,8 +53,8 @@ Each instance is a trn2.48xlarge with 16 chips.
 
 | Instance | Arms (T + C per model; R where it differs from T) | Chips |
 |---|---|---|
-| A | Qwen3-32B T/C (4), ASR R/T/C (6), Llama R/T/C (3) | 13 |
-| B | Embedding R/T/C (6), VL T/C (2), GPT-OSS T/C (4) | 12 |
+| A | Qwen3-32B T/C (4), ASR R/T/C (6) + C-T4 (1) + C-LNC1 (1), Llama R/T/C + T-no77 (4, R on TP8 = 2) | 16 |
+| B | Embedding T/C (4), VL T/C (2), GPT-OSS T/C (4) | 10 |
 
 - Separate compile caches for the nki-library arms.
 - No pre-seeded caches for flag arms.
