@@ -182,7 +182,16 @@ class H(http.server.BaseHTTPRequestHandler):
                 print(f"(EngineCore pid={os.getpid()}) ERROR fake engine died after {f[0]} requests", file=sys.stderr, flush=True)
                 os._exit(1)
         if self.path == "/v1/embeddings":
-            return self._send(200, {"data": [{"embedding": [0.1, 0.2]}]})
+            inp = req.get("input", "")
+            items = inp if isinstance(inp, list) else [inp]
+            def vec(t):   # deterministic per input text, independent of its neighbours (like a correct server)
+                h = hashlib.sha256(str(t).encode()).digest()
+                return [round((b - 127.5) / 127.5, 6) for b in h[:8]]
+            if os.environ.get("COVEX_PACK_TRACE") == "1":   # what the real runner logs per packed prefill step
+                n = len(items); m = [{"req": f"r{i}", "start": 128 * i, "tokens": 64, "padded": 128} for i in range(n)]
+                print(f"(Worker_TP0 pid={os.getpid()}) INFO neuron_model_runner.py:4240 COVEX_PACK_TRACE prefill step: "
+                      f"members={m!r} total_padded={128 * n} padded_num_reqs=8 packed=True", file=sys.stderr, flush=True)
+            return self._send(200, {"data": [{"index": i, "embedding": vec(t)} for i, t in enumerate(items)]})
         if self.path == "/v1/chat/completions":
             return self._send(200, {"choices": [{"message": {"content": "ok"}}],
                                     "usage": {"prompt_tokens": 1, "completion_tokens": 2, "total_tokens": 3}})

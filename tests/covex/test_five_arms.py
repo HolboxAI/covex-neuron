@@ -1637,7 +1637,13 @@ def _emb_run(tmp_path, extra):
     run = tmp_path / "run"; run.mkdir()
     env = dict(os.environ, HOME=str(home), PATH=f"{ROOT/'tests/covex/fake_bin'}:{os.environ['PATH']}", PYTHONPATH=str(stub["fork"]),
                UPSTREAM_PY=str(upy), UPSTREAM_DIR=str(stub["upstream"]), FORK_DIR=str(stub["fork"]), EMB_MIN_PROCS="1",
-               EMB_DATA=str(data), EMB_ARMS="emb-U emb-T emb-P4 emb-P8", EMB_LENS="t64", EMB_WINDOWS="1", **extra)
+               EMB_DATA=str(data), EMB_LENS="t64", EMB_WINDOWS="1",
+               **{"EMB_ARMS": "emb-U emb-T emb-P4 emb-P8", **extra})
+    tk = tmp_path / "tokstub/transformers"; tk.mkdir(parents=True)     # isolation.py tokenizer (whitespace, like the fake)
+    (tk / "__init__.py").write_text(
+        "class _T:\n    def encode(self, text, add_special_tokens=False):\n        return text.split()\n"
+        "class AutoTokenizer:\n    @staticmethod\n    def from_pretrained(path, **kw):\n        return _T()\n")
+    env["PYTHONPATH"] = f"{env['PYTHONPATH']}:{tk.parent}"
     r = subprocess.run(["bash", str(ROOT / "benchmarks/emb/run.sh")], cwd=run, env=env, capture_output=True, text=True, timeout=900)
     return r, run
 
@@ -1697,3 +1703,14 @@ def test_emb_diag_payload_runs_isolation_on_the_traced_arm(tmp_path):
     assert m and int(m.group(1)) * 8.60 / 60 <= 6.0
     s = (ROOT / "benchmarks/emb/run.sh").read_text()
     assert s.index("Isolation diagnostic (before any timed window)") < s.index("for t in $LENS; do")
+
+
+
+@pytest.mark.skipif(not LINUX, reason="Linux CI")
+def test_emb_diag_isolation_runs_and_verifies_packed_steps(tmp_path):
+    r, run = _emb_run(tmp_path, {"EMB_ARMS": "emb-U emb-T emb-P8t", "EMB_ISOLATION_ARM": "emb-P8t"})
+    iso = json.load(open(run / "results/emb-isolation.json"))
+    assert iso.get("peer_invariant") is True and iso.get("packed_step_verified") is True, (iso, (run / "logs/isolation.log").read_text()[-1500:])
+    res = (run / "RESULTS.md").read_text()
+    assert "## Isolation diagnostic" in res and "packed_step_verified=True" in res, res
+    assert r.returncode == 0 and "RUN OK" in r.stdout, r.stdout[-2000:]
