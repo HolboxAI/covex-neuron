@@ -1681,4 +1681,19 @@ def test_emb_p1x_forces_packed_attention_with_one_prefill():
                        env=dict(os.environ, DRYRUN="1"))
     assert r.returncode == 0 and "flags=COVEX_FORCE_PACKED_ATTENTION" in r.stdout and "max_prefills_per_batch" not in r.stdout
     src = (ROOT / "vllm_neuron/vllm/worker/neuron_model_runner.py").read_text()
-    assert src.count('> 1 or envs.COVEX_FORCE_PACKED_ATTENTION,') == 2       # runtime and warmup metadata agree
+    assert src.count('"packed_prefill": getattr(self, "max_prefills_per_batch", 1) > 1 or envs.COVEX_FORCE_PACKED_ATTENTION,') == 2
+
+
+
+def test_emb_diag_payload_runs_isolation_on_the_traced_arm(tmp_path):
+    out = tmp_path / "p.sh"
+    r = subprocess.run(["bash", str(ROOT / "benchmarks/q32/render_payload.sh"), *PINS, str(out), "", "3"],
+                       env=dict(os.environ, TEMPLATE=str(ROOT / "benchmarks/emb/payload_diag.sh"), READY_MIN="25"),
+                       capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    t = out.read_text()
+    assert 'EMB_ARMS="emb-U emb-T emb-P8t" EMB_ISOLATION_ARM=emb-P8t' in t and 'P="emb-diag/$RUN_ID"' in t
+    m = re.search(r"^shutdown -h \+(\d+)", t, re.M)
+    assert m and int(m.group(1)) * 8.60 / 60 <= 6.0
+    s = (ROOT / "benchmarks/emb/run.sh").read_text()
+    assert s.index("Isolation diagnostic (before any timed window)") < s.index("for t in $LENS; do")

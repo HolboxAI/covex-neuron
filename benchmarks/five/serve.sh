@@ -38,7 +38,7 @@ case "$ARM" in
     ARGS=("$M/Qwen3-32B" --served-model-name m --dtype bfloat16 --tensor-parallel-size 8 --max-model-len 32768
           --max-num-batched-tokens 8192 --max-num-seqs 8 --no-enable-prefix-caching
           ); CFG="{\"neuron_config\":{${CTX:-}\"num_batched_tokens_buckets\":[1024,8192],\"num_seqs_buckets\":[1,2,4,8],\"on_device_sampling_config\":{\"all_greedy\":true}}}" ;;
-  emb-U|emb-T|emb-C|emb-P1x|emb-P4|emb-P8|emb-P16)  # Qwen3-Embedding-8B, TP8, tutorial config, identical in every arm except
+  emb-U|emb-T|emb-C|emb-P1x|emb-P4|emb-P8|emb-P8t|emb-P16)  # Qwen3-Embedding-8B, TP8, tutorial config, identical in every arm except
     # the prefills packed per step: U = pinned upstream (own venv), T = fork 1 per step, P<N> = fork N per step
     # (C = legacy name for P16). Packing was KNOWN BROKEN (fail_on_recompile on max_query_len) until the canonical
     # per-bucket max_query_len fix (bucket_utils.canonical_prefill_max_query_len).
@@ -50,6 +50,8 @@ case "$ARM" in
       emb-P1x) CORES=${EMB_CORES:-32-39}; EXTRA=''; export COVEX_FORCE_PACKED_ATTENTION=1 ;;
       emb-P4) CORES=${EMB_CORES:-40-47}; EXTRA='"max_prefills_per_batch":4,' ;;
       emb-P8) CORES=${EMB_CORES:-40-47}; EXTRA='"max_prefills_per_batch":8,' ;;
+      # P8t: P8 plus one INFO line per prefill step (members, offsets, padding) for the isolation diagnostic
+      emb-P8t) CORES=${EMB_CORES:-40-47}; EXTRA='"max_prefills_per_batch":8,'; export COVEX_PACK_TRACE=1 ;;
       emb-C|emb-P16) CORES=${EMB_CORES:-40-47}; EXTRA='"max_prefills_per_batch":16,' ;;
     esac
     ARGS=("$M/Qwen3-Embedding-8B" --served-model-name m --runner pooling --dtype bfloat16 --tensor-parallel-size 8

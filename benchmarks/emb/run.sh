@@ -43,6 +43,22 @@ if [ ${#exp[@]} -gt 0 ]; then
   done
 fi
 
+# Isolation diagnostic (before any timed window): stock vs the packed arm, then server-trace membership check.
+if [ -n "${EMB_ISOLATION_ARM:-}" ]; then
+  ia=$EMB_ISOLATION_ARM
+  if up emb-U && up $ia; then
+    L0=$(wc -l < "logs/$ia.server.log")
+    pin $ia python3 "$H/isolation.py" --stock-url "http://127.0.0.1:${PORT[emb-U]}" --packed-url "http://127.0.0.1:${PORT[$ia]}" \
+      --model m --dataset "$D/t64.jsonl" --tokenizer "${MODELS_DIR:-$HOME/models}/Qwen3-Embedding-8B" --repeat 2 \
+      --out results/emb-isolation.json > logs/isolation.log 2>&1
+    sleep 2
+    python3 "$H/pack_trace_check.py" "logs/$ia.server.log" "$L0" results/emb-isolation.json >> logs/isolation.log 2>&1
+    [ -s results/emb-isolation.json ] || status isolation run "FAILED no report"
+    python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); sys.exit(0 if "cases" in d else 1)' results/emb-isolation.json 2>/dev/null \
+      || status isolation run "FAILED client did not complete: $(tail -c 200 logs/isolation.log | tr '\n\t' '  ')"
+  else status isolation run "FAILED emb-U or $ia not up"; fi
+fi
+
 for t in $LENS; do
   for w in warm $(seq 1 "$WINDOWS"); do P=()
     for a in $ARMS; do up $a && { EMB_ALL_VECTORS=$([ $w = 1 ] && echo 1 || echo 0) pin $a python3 $C emb ${PORT[$a]} $D/$t.jsonl 256 32 results/$a-$t-w$w.json & P+=($!); }; done
@@ -56,6 +72,19 @@ done
 
 for a in "${!SPID[@]}"; do stop_arm "${SPID[$a]}"; done
 python3 "$H/summarize.py" results --arms "$ARMS" --lens "$LENS" --windows "$WINDOWS" --status results/STATUS.tsv > RESULTS.md; srv=$?
+if [ -s results/emb-isolation.json ]; then
+  python3 - results/emb-isolation.json >> RESULTS.md <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+print("\n## Isolation diagnostic (B fixed, peer changed)\n")
+print(f"pass={d.get('pass')} peer_invariant={d.get('peer_invariant')} repeat_stable={d.get('repeat_stable')} "
+      f"packed_step_verified={d.get('packed_step_verified')} ({d.get('trace_reason')})\n")
+print("| check | cosine | exact |\n|---|---|---|")
+for k, v in (d.get("checks") or {}).items():
+    print(f"| {k} | {v.get('cosine')} | {v.get('exact')} |")
+PY
+fi
 cat RESULTS.md; fail=$srv
+awk -F'\t' '$1=="isolation"{f=1} END{exit !f}' results/STATUS.tsv 2>/dev/null && fail=1
 for a in $ARMS; do up $a || { echo "REQUIRED arm $a not ready"; fail=1; }; done
 echo "RUN $([ $fail = 0 ] && echo OK || echo INCOMPLETE)"; exit $fail

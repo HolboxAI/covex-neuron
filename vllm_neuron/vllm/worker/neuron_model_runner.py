@@ -4241,6 +4241,19 @@ class NeuronModelRunner(KVConnectorModelRunnerMixin, NeuronECConnectorModelRunne
         # Compute cached_seq_len for segmented prefill
         cached_seq_len = self._compute_cached_seq_len()
 
+        if envs.COVEX_PACK_TRACE and max_num_scheduled_tokens_padded > self._decode_token_threshold():
+            offs = np.concatenate([[0], np.cumsum(num_scheduled_tokens_padded)[:-1]]).tolist()
+            logger.info(
+                "COVEX_PACK_TRACE prefill step: members=%s total_padded=%d padded_num_reqs=%d packed=%s",
+                [
+                    {"req": r, "start": int(o), "tokens": int(t), "padded": int(pt)}
+                    for r, o, t, pt in zip(req_ids, offs, actual_num_tokens.tolist(), num_scheduled_tokens_padded.tolist())
+                ],
+                total_num_scheduled_tokens_padded,
+                padded_num_reqs,
+                getattr(self, "max_prefills_per_batch", 1) > 1 or envs.COVEX_FORCE_PACKED_ATTENTION,
+            )
+
         # Build attention metadata. Packed prefill (max_prefills_per_batch > 1): one max_query_len per bucket, so the
         # compiled graph's guard holds for every mix of prompt lengths (see canonical_prefill_max_query_len).
         from vllm_neuron.utils.bucket_utils import canonical_prefill_max_query_len

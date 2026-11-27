@@ -55,6 +55,7 @@ if TYPE_CHECKING:
     # COVEX: Qwen3 decode (nkh == 1 path, BF16 KV) writes new K/V inside the attention kernel instead of index_put_.
     COVEX_QWEN3_INKERNEL_KV_WRITE: bool = False
     COVEX_FORCE_PACKED_ATTENTION: bool = False
+    COVEX_PACK_TRACE: bool = False
     # COVEX: fold Qwen3-ASR encoder norm2 (LayerNorm) into the audio MLP NKI kernel. Off by default.
     COVEX_ASR_ENCODER_LN_IN_MLP: bool = False
     VLLM_NEURON_RESERVED_HEADROOM_GIB: float | None = None
@@ -353,6 +354,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "COVEX_FORCE_PACKED_ATTENTION": lambda: (
         maybe_convert_bool(os.getenv("COVEX_FORCE_PACKED_ATTENTION")) or False
     ),
+    # Diagnostic: one INFO line per prefill step with its members (request id, start offset, real and padded tokens),
+    # the padded total and the request-row bucket, so a client can prove two inputs shared one packed Neuron step.
+    "COVEX_PACK_TRACE": lambda: maybe_convert_bool(os.getenv("COVEX_PACK_TRACE")) or False,
     "COVEX_VL_VISION_MLP_NKI": lambda: (
         maybe_convert_bool(os.getenv("COVEX_VL_VISION_MLP_NKI")) or False
     ),
