@@ -105,6 +105,15 @@ def replay_ok(arm):
     return True, ""
 
 
+# A check that did not complete (file missing, wrong sample count, tool error, wrong needle lengths) is missing work;
+# only a completed comparison with different tokens or a wrong answer is a finding.
+NOT_RUN = ("not run", "covered n=", "needles ran lengths", "needle tool error", "needles empty")
+
+
+def not_completed(reason):
+    return any(k in reason for k in NOT_RUN)
+
+
 def baseline():
     """Reasons U cannot serve as the reference (empty = valid): it must repeat itself exactly on the replay batch and
     answer all three needles. Without that, no ratio and no equivalence claim is printed against it."""
@@ -175,6 +184,8 @@ for arm in ARMS:
                 # dynamic FA: keep throughput visible, labelled; tokens differ, so no equivalence or headline claim
                 print(f"| {arm} | {ref} | {c} | {x} | {r} | {x / r:.2f}x (exploratory) | tokens differ: {'; '.join(corr_why)} |")
                 continue
+            if RUN2:   # a required check that never completed is missing work, not a finding
+                hard += [w for w in corr_why if not_completed(w)]
             why = hard + corr_why
             ratio = f"{x / r:.2f}x" if not why and x and r else "–"
             label = "complete" + (" (exploratory arm)" if arm in EXPLORATORY else "")

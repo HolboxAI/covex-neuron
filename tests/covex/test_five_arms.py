@@ -1518,3 +1518,27 @@ def test_run2_stalled_arm_stops_at_the_boot_relative_deadline(tmp_path):
     assert took < 90, f"took {took:.0f}s for a 20 s deadline"
     assert not (run / "results/q32-U.replay.json").exists(), "nothing measured after a not-ready arm"
     assert subprocess.run(["pgrep", "-f", "fake_server.py"], capture_output=True).returncode != 0, "servers left running"
+
+
+
+def test_q32_run2_missing_comparison_is_incomplete_but_mismatch_is_a_finding(tmp_path):
+    """Astra (2fe81f7): with q32-Ut.vs.q32-U.replay.match.json missing, the ratio was withheld but the run exited 0."""
+    def summ(d):
+        return subprocess.run(["python3", str(ROOT / "benchmarks/q32/summarize.py"), str(d), "--arms", "q32-U q32-Ut q32-F",
+                               "--windows", "1", "--workloads", "c1 c8 m5k-c8", "--run2",
+                               "--required", "q32-Ut:q32-U q32-F:q32-U"], capture_output=True, text=True)
+    a = tmp_path / "missing"; a.mkdir(); _run2_fixture(a)
+    (a / "q32-Ut.vs.q32-U.replay.match.json").unlink()
+    r = summ(a)
+    assert r.returncode == 1 and "INCOMPLETE (required): q32-Ut vs q32-U c1: replay not run" in r.stdout, r.stdout
+    b = tmp_path / "malformed"; b.mkdir(); _run2_fixture(b)
+    (b / "q32-Ut.vs.q32-U.replay.match.json").write_text(json.dumps({"pass": True, "n": 3}))   # wrong sample count
+    r = summ(b)
+    assert r.returncode == 1 and "replay covered n=3, expected 8" in r.stdout, r.stdout
+    c = tmp_path / "toolerr"; c.mkdir(); _run2_fixture(c)
+    (c / "q32-Ut.needle.json").write_text(json.dumps({"pass": False, "results": [
+        {"len": L, "pass": False, "got": None} for L in (8204, 9644, 24044)]}))
+    assert summ(c).returncode == 1
+    d = tmp_path / "mismatch"; d.mkdir()
+    r = _run2_fixture(d, f_replay_pass=False)                                # a completed token difference
+    assert r.returncode == 0 and "replay differs on 1 prompt(s)" in r.stdout, r.stdout
