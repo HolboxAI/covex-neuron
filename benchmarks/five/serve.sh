@@ -38,6 +38,22 @@ case "$ARM" in
     ARGS=("$M/Qwen3-32B" --served-model-name m --dtype bfloat16 --tensor-parallel-size 8 --max-model-len 32768
           --max-num-batched-tokens 8192 --max-num-seqs 8 --no-enable-prefix-caching
           ); CFG="{\"neuron_config\":{${CTX:-}\"num_batched_tokens_buckets\":[1024,8192],\"num_seqs_buckets\":[1,2,4,8],\"on_device_sampling_config\":{\"all_greedy\":true}}}" ;;
+  k9-U|k9-E3|k9-P)  # K9 code-edit benchmark, Qwen3-32B BF16 TP8 at 10,240 context (where upstream validated EAGLE3),
+    # 4 sequences, identical config except the speculation:
+    #   U  = pinned upstream, no speculation          E3 = pinned upstream + EAGLE3 draft (4 tokens)
+    #   P  = fork, predicted outputs / prompt lookup (method ngram, 4 tokens; host-proposed, synchronous scheduling)
+    SPEC=()
+    case $ARM in
+      k9-U)  CORES=${K9_CORES:-0-7};  VLLM=("${UPSTREAM_PY:?UPSTREAM_PY (upstream venv python) required}" -m vllm.entrypoints.cli.main) ;;
+      k9-E3) CORES=${K9_CORES:-8-15}; VLLM=("${UPSTREAM_PY:?UPSTREAM_PY (upstream venv python) required}" -m vllm.entrypoints.cli.main)
+             SPEC=(--speculative-config "{\"method\":\"eagle3\",\"model\":\"$M/Qwen3-32B-speculator.eagle3\",\"num_speculative_tokens\":4}") ;;
+      k9-P)  CORES=${K9_CORES:-16-23}
+             SPEC=(--speculative-config '{"method":"ngram","num_speculative_tokens":4,"prompt_lookup_min":3,"prompt_lookup_max":8}' --no-async-scheduling) ;;
+    esac
+    export VLLM_NEURON_RESERVED_HEADROOM_GIB=${K9_HEADROOM_GIB:-7}
+    ARGS=("$M/Qwen3-32B" --served-model-name m --dtype bfloat16 --tensor-parallel-size 8 --max-model-len 10240
+          --max-num-batched-tokens 8192 --max-num-seqs 4 --no-enable-prefix-caching ${SPEC[@]+"${SPEC[@]}"}
+          ); CFG='{"neuron_config":{"num_batched_tokens_buckets":[1024,8192],"num_seqs_buckets":[1,2,4],"on_device_sampling_config":{"all_greedy":true}}}' ;;
   emb-U|emb-T|emb-C|emb-P1x|emb-P4|emb-P8|emb-P8t|emb-P16)  # Qwen3-Embedding-8B, TP8, tutorial config, identical in every arm except
     # the prefills packed per step: U = pinned upstream (own venv), T = fork 1 per step, P<N> = fork N per step
     # (C = legacy name for P16). Packing was KNOWN BROKEN (fail_on_recompile on max_query_len) until the canonical

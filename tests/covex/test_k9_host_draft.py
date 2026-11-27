@@ -80,3 +80,18 @@ def test_decode_warmup_draft_calls_are_noops_for_host_drafts():
     src = (ROOT / "vllm_neuron/vllm/worker/neuron_model_runner.py").read_text()
     for call in ("self.drafter.graph_extract(", "self.drafter.warmup("):
         assert src.count(call) == 2, call                                    # prefill (guarded) + decode (no-op)
+
+
+def test_k9_serve_arms_differ_only_in_speculation():
+    import os, subprocess
+    out = {}
+    for a in ("k9-U", "k9-E3", "k9-P"):
+        r = subprocess.run(["bash", str(ROOT / "benchmarks/five/serve.sh"), a, "8100"], capture_output=True, text=True,
+                           env=dict(os.environ, DRYRUN="1", UPSTREAM_PY="/up/python"))
+        assert r.returncode == 0, r.stderr
+        out[a] = r.stdout.splitlines()[-1]
+    assert "--speculative-config" not in out["k9-U"] and "eagle3" in out["k9-E3"] and "/up/python" in out["k9-E3"]
+    assert "ngram" in out["k9-P"] and "--no-async-scheduling" in out["k9-P"] and "/up/python" not in out["k9-P"]
+    import re
+    strip = lambda s: re.sub(r" --speculative-config \S+| --no-async-scheduling", "", s.split(" serve ", 1)[1])
+    assert strip(out["k9-U"]) == strip(out["k9-E3"]) == strip(out["k9-P"])        # same model/context/batch config
