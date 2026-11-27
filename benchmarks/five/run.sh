@@ -17,7 +17,9 @@ start() {  # arm
     *)     pin "$1" "$H/serve.sh" "$1" "${PORT[$1]}" ;;
   esac
 }
-for a in "${!PORT[@]}"; do start "$a" & done
+# emb-C is KNOWN BROKEN (packed-prefill recompile); BROKEN_ARMS keeps it out until fixed. Checked by the tests.
+BROKEN_ARMS=" emb-C "
+for a in "${!PORT[@]}"; do [[ "$BROKEN_ARMS" == *" $a "* ]] && { echo "ARM $a SKIPPED (known broken)"; continue; }; start "$a" & done
 declare -A UP
 for a in "${!PORT[@]}"; do
   for _ in $(seq 1 360); do  # <= 60 min per arm (compile); stops early if the server died

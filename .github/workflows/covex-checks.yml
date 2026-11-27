@@ -1,0 +1,25 @@
+name: covex-checks
+
+# Static checks that encode every failure we hit on Trainium (see tests/covex). No Neuron hardware needed.
+on:
+  pull_request:
+  push:
+    branches: ["exp/**", "feat/**", "port/**", "main"]
+
+permissions:
+  contents: read
+
+jobs:
+  covex-checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install pytest pyflakes
+      - name: Make origin/main available for the changed-files check
+        run: git fetch --no-tags origin main:refs/remotes/origin/main || true
+      - run: python -m pytest tests/covex -q
