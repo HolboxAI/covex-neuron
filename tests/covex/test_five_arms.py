@@ -10,7 +10,7 @@ ROOT = Path(__file__).resolve().parents[2]
 SERVE = ROOT / "benchmarks/five/serve.sh"
 RUN = ROOT / "benchmarks/five/run.sh"
 PAYLOAD = ROOT / "benchmarks/five/payload.sh"
-ARMS = ["q32-T", "q32-K", "q32-F", "q32-C", "emb-T", "emb-C", "vl-T", "vl-C", "oss-T"]
+ARMS = ["q32-T", "q32-K", "q32-F", "q32-C", "emb-T", "emb-C", "emb-P4", "emb-P8", "emb-P16", "vl-T", "vl-C", "oss-T"]
 GIB = 1024 ** 3
 
 # Per-model facts for the HBM check: total BF16 weight bytes, TP degree, KV bytes per token per rank, limits.

@@ -31,10 +31,18 @@ case "$ARM" in
     ARGS=("$M/Qwen3-32B" --served-model-name m --dtype bfloat16 --tensor-parallel-size 8 --max-model-len 32768
           --max-num-batched-tokens 8192 --max-num-seqs 8 --no-enable-prefix-caching
           ); CFG='{"neuron_config":{"num_batched_tokens_buckets":[1024,8192],"num_seqs_buckets":[1,2,4,8],"on_device_sampling_config":{"all_greedy":true}}}' ;;
-  emb-T|emb-C)  # Qwen3-Embedding-8B, TP8, tutorial config; C = 16 prefills per step
-    # KNOWN BROKEN (2026-11-27): packed prefills change max_query_len per step -> torch.compile recompile ->
-    # 'fail_on_recompile'. Needs a warmup/padding fix for the pooling path before emb-C can run.
-    [ "$ARM" = emb-T ] && { CORES=32-39; EXTRA=''; } || { CORES=40-47; EXTRA='"max_prefills_per_batch":16,'; }
+  emb-U|emb-T|emb-C|emb-P4|emb-P8|emb-P16)  # Qwen3-Embedding-8B, TP8, tutorial config, identical in every arm except
+    # the prefills packed per step: U = pinned upstream (own venv), T = fork 1 per step, P<N> = fork N per step
+    # (C = legacy name for P16). Packing was KNOWN BROKEN (fail_on_recompile on max_query_len) until the canonical
+    # per-bucket max_query_len fix (bucket_utils.canonical_prefill_max_query_len).
+    case $ARM in
+      emb-U) CORES=${EMB_CORES:-32-39}; EXTRA=''
+             VLLM=("${UPSTREAM_PY:?UPSTREAM_PY (upstream venv python) required}" -m vllm.entrypoints.cli.main) ;;
+      emb-T) CORES=${EMB_CORES:-32-39}; EXTRA='' ;;
+      emb-P4) CORES=${EMB_CORES:-40-47}; EXTRA='"max_prefills_per_batch":4,' ;;
+      emb-P8) CORES=${EMB_CORES:-40-47}; EXTRA='"max_prefills_per_batch":8,' ;;
+      emb-C|emb-P16) CORES=${EMB_CORES:-40-47}; EXTRA='"max_prefills_per_batch":16,' ;;
+    esac
     ARGS=("$M/Qwen3-Embedding-8B" --served-model-name m --runner pooling --dtype bfloat16 --tensor-parallel-size 8
           --max-model-len 4096 --max-num-batched-tokens 4096 --max-num-seqs 32 --no-enable-prefix-caching
           ); CFG="{\"neuron_config\":{${EXTRA}\"num_batched_tokens_buckets\":[128,256,512,1024,2048,4096]}}" ;;

@@ -39,7 +39,8 @@ def emb(port, path, n, conc, out):
     make = lambda c, i: c.post(f"http://127.0.0.1:{port}/v1/embeddings", json={"model": "m", "input": texts[i % len(texts)]})
     asyncio.run(run_pool(4, 4, make))  # warm
     wall, lat, outs = asyncio.run(run_pool(n, conc, make))
-    vecs = [outs[i]["data"][0]["embedding"] for i in range(min(20, n))]
+    keep = n if os.environ.get("EMB_ALL_VECTORS") == "1" else min(20, n)   # sweep checks cosine on EVERY vector
+    vecs = [outs[i]["data"][0]["embedding"] for i in range(keep)]
     json.dump(summary(n, conc, wall, lat, {"seq_per_s": round(n / wall, 3), "vectors": vecs}), open(out, "w"))
 
 def vl(port, d, n, conc, out):
@@ -103,7 +104,8 @@ def match(a, b):
         import math
         cos = [sum(x * y for x, y in zip(u, v)) / (math.sqrt(sum(x * x for x in u)) * math.sqrt(sum(y * y for y in v)))
                for u, v in zip(A["vectors"], B["vectors"])]
-        ok = len(A["vectors"]) == len(B["vectors"]) > 0 and min(cos) >= 0.9999
+        thr = float(os.environ.get("EMB_COS_MIN", "0.9999"))   # packing sweep uses 0.999 on every vector
+        ok = len(A["vectors"]) == len(B["vectors"]) > 0 and min(cos) >= thr
         print(json.dumps({"min_cosine": round(min(cos), 6) if cos else None, "n": len(cos), "pass": ok}))
     elif "token_ids" in A or "token_ids" in B:
         # exact token-id agreement; both sides must hold every prompt with exactly gen_tokens ids
