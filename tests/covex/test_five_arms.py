@@ -1621,3 +1621,56 @@ def test_q32_run2_every_required_comparison_and_strict_verdicts(tmp_path):
         cmp = r.stdout.split("## Comparisons", 1)[1].split("##", 1)[0]
         arm = f.split(".vs.")[0]
         assert not any(re.search(r"\| \d+\.\d+x", l) for l in cmp.splitlines() if l.startswith(f"| {arm} |")), cmp
+
+
+# ---------------- embedding packing run (emb/run.sh) end to end with fakes ----------------------------------------
+def _emb_run(tmp_path, extra):
+    home = tmp_path / "home"; (home / "models/Qwen3-Embedding-8B").mkdir(parents=True)
+    data = tmp_path / "embed"; data.mkdir()
+    (data / "t64.jsonl").write_text("".join(json.dumps({"text": f"sentence number {i} " * 8}) + "\n" for i in range(300)))
+    stub = {}
+    for k in ("upstream", "fork"):
+        stub[k] = tmp_path / f"stub-{k}"; (stub[k] / "vllm_neuron").mkdir(parents=True)
+        (stub[k] / "vllm_neuron/__init__.py").write_text("")
+    upy = tmp_path / "upy"
+    upy.write_text(f"#!/bin/bash\nshift 2\nexport PYTHONPATH=\"${{PYTHONPATH%%:*}}:{stub['upstream']}\"\nexec vllm \"$@\"\n"); upy.chmod(0o755)
+    run = tmp_path / "run"; run.mkdir()
+    env = dict(os.environ, HOME=str(home), PATH=f"{ROOT/'tests/covex/fake_bin'}:{os.environ['PATH']}", PYTHONPATH=str(stub["fork"]),
+               UPSTREAM_PY=str(upy), UPSTREAM_DIR=str(stub["upstream"]), FORK_DIR=str(stub["fork"]), EMB_MIN_PROCS="1",
+               EMB_DATA=str(data), EMB_ARMS="emb-U emb-T emb-P4 emb-P8", EMB_LENS="t64", EMB_WINDOWS="1", **extra)
+    r = subprocess.run(["bash", str(ROOT / "benchmarks/emb/run.sh")], cwd=run, env=env, capture_output=True, text=True, timeout=900)
+    return r, run
+
+
+@pytest.mark.skipif(not LINUX, reason="Linux CI")
+def test_emb_packing_run_success_with_fakes(tmp_path):
+    r, run = _emb_run(tmp_path, {})
+    assert r.returncode == 0 and "RUN OK" in r.stdout, r.stdout[-3000:] + r.stderr[-1500:]
+    st = (run / "results/STATUS.tsv").read_text()
+    assert all(f"{a}\tprovenance\tPASS" in st for a in ("emb-U", "emb-T", "emb-P4", "emb-P8")), st
+    for a in ("emb-T", "emb-P4", "emb-P8"):
+        assert json.load(open(run / f"results/{a}.vs.emb-U.t64.match.json"))["pass"] is True
+    assert subprocess.run(["pgrep", "-f", "fake_server.py"], capture_output=True).returncode != 0, "servers left running"
+
+
+@pytest.mark.skipif(not LINUX, reason="Linux CI")
+def test_emb_packing_run_stalled_arm_stops_at_deadline(tmp_path):
+    import time
+    t0 = time.time()
+    r, run = _emb_run(tmp_path, {"FAKE_SLOW_READY": "8202:600", "EMB_READY_DEADLINE": str(int(t0) + 20)})
+    assert r.returncode == 1 and time.time() - t0 < 120, r.stdout[-2000:]
+    assert "emb-P4\tready\tFAILED" in (run / "results/STATUS.tsv").read_text()
+
+
+def test_emb_payload_renders_with_pins_and_cap(tmp_path):
+    out = tmp_path / "p.sh"
+    r = subprocess.run(["bash", str(ROOT / "benchmarks/q32/render_payload.sh"), *PINS, str(out), "", "3"],
+                       env=dict(os.environ, TEMPLATE=str(ROOT / "benchmarks/emb/payload.sh"), READY_MIN="25"),
+                       capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    t = out.read_text()
+    assert "@@" not in t and "benchmarks/emb/run.sh" in t and 'P="emb/$RUN_ID"' in t
+    assert "T hf download Qwen/Qwen3-Embedding-8B --revision " + "c" * 40 in t and "sixdata/embed/t64.jsonl" in t
+    assert 'EMB_ARMS="emb-U emb-T emb-P4 emb-P8" EMB_LENS=t64' in t and "EMB_READY_DEADLINE=$READY_AT" in t
+    m = re.search(r"^shutdown -h \+(\d+)", t, re.M)
+    assert m and int(m.group(1)) * 8.60 / 60 <= 7.0

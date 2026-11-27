@@ -21,7 +21,9 @@ status() { printf '%s\t%s\t%s\n' "$1" "$2" "$3" >> results/STATUS.tsv; }
 
 for a in $ARMS; do EMB_CORES=${CORE[$a]} MODELS_DIR=${MODELS_DIR:-$HOME/models} pin $a "$F/serve.sh" $a ${PORT[$a]} & SPID[$a]=$!; done
 for a in "${!SPID[@]}"; do
-  ( why=$(wait_ready "${SPID[$a]}" "${PORT[$a]}" 3600 emb m); rc=$?; printf '%s\t%s\n' "$rc" "$why" > "logs/$a.ready" ) & RPID[$a]=$!
+  ( left=$(( ${EMB_READY_DEADLINE:-$(( $(date +%s) + 3600 ))} - $(date +%s) )); [ $left -lt 1 ] && left=1
+    why=$(WAIT_READY_SMOKE_SECS=$left wait_ready "${SPID[$a]}" "${PORT[$a]}" "$left" emb m); rc=$?
+    printf '%s\t%s\n' "$rc" "$why" > "logs/$a.ready" ) & RPID[$a]=$!
 done
 for a in "${!RPID[@]}"; do
   wait "${RPID[$a]}"; IFS=$'\t' read -r rc why < "logs/$a.ready"
@@ -29,7 +31,8 @@ for a in "${!RPID[@]}"; do
 done
 up() { [ -n "${UP[$1]:-}" ]; }
 # provenance gate (same verifier as q32): one verdict per launched arm, crash -> every arm dropped
-exp=(); lg=(); for a in "${!UP[@]}"; do [ $a = emb-U ] && exp+=("$a=$UPSTREAM_DIR") || exp+=("$a=$FORK_DIR"); lg+=(--log "$a=$PWD/logs/$a.server.log"); done
+exp=(); lg=(); for a in "${!UP[@]}"; do [ $a = emb-U ] && exp+=("$a=$UPSTREAM_DIR${UPSTREAM_PREFIX:+@$UPSTREAM_PREFIX}") \
+  || exp+=("$a=$FORK_DIR${FORK_PREFIX:+@$FORK_PREFIX}"); lg+=(--log "$a=$PWD/logs/$a.server.log"); done
 if [ ${#exp[@]} -gt 0 ]; then
   python3 "$H/../provenance/verify.py" "$COVEX_PROVENANCE_DIR" "${EMB_MIN_PROCS:-10}" --tp "${EMB_TP:-8}" "${lg[@]}" "${exp[@]}" \
     > results/provenance.tsv 2> logs/provenance.err; vrc=$?
