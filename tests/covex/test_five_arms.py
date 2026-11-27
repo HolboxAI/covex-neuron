@@ -1262,7 +1262,63 @@ def test_q32_tpot_uses_output_tokens_and_headline_excludes_disqualified_arms(tmp
                         "--windows", "1", "--status", str(st)], capture_output=True, text=True)
     u_c8 = next(l for l in r.stdout.splitlines() if l.startswith("| q32-U | c8 |"))
     assert "0.100 s / 40.00 ms" in u_c8 and "| PASS |" in u_c8, u_c8
-    best = r.stdout.split("## Best eligible tested point per arm", 1)[1]
+    best = r.stdout.split("## Best eligible tested point per arm and workload", 1)[1]
     assert "| q32-K | – | – | not eligible: failed step: provenance" in best, best
-    assert "| q32-F | – | – | not eligible: tokens differ from U" in best, best
+    assert "| q32-F | – | – | not eligible: cache c1: outputs differ" in best, best
     assert "| q32-U | c" in best and "| q32-T | c" in best
+
+
+
+def _run2_fixture(tmp_path, ut_tpot_itl=0.02, f_replay_pass=True, ut_needle_fail=False, u_rerun_pass=True):
+    def bench(n, in_tok, itl):
+        return {"num_prompts": n, "completed": n, "failed": 0, "total_output_tokens": n * 256, "total_input_tokens": in_tok,
+                "output_throughput": 100.0, "median_tpot_ms": 10.0, "median_ttft_ms": 50.0, "ttfts": [0.5] * n,
+                "itls": [[itl] * 255 for _ in range(n)], "output_lens": [256] * n}
+    for arm in ("q32-U", "q32-Ut", "q32-F"):
+        itl = ut_tpot_itl if arm == "q32-Ut" else 0.02
+        (tmp_path / f"{arm}-c1-w1.json").write_text(json.dumps(bench(8, 8 * 1024, 0.02)))
+        (tmp_path / f"{arm}-c8-w1.json").write_text(json.dumps(bench(32, 32 * 1024, 0.02)))
+        (tmp_path / f"{arm}-m5k-c8-w1.json").write_text(json.dumps(bench(16, 81234, itl)))
+        if arm != "q32-U":
+            for k in (1, 3):
+                (tmp_path / f"{arm}.vs.q32-U.cache.c{k}.match.json").write_text(json.dumps({"pass": True, "n": 18}))
+            ok = f_replay_pass or arm != "q32-F"
+            (tmp_path / f"{arm}.vs.q32-U.replay.match.json").write_text(json.dumps(
+                {"pass": ok, "n": 8, "mismatches": [] if ok else [{"i": 3, "first_diff": 5, "near_tie": True}]}))
+        bad = ut_needle_fail and arm == "q32-Ut"
+        (tmp_path / f"{arm}.needle.json").write_text(json.dumps({"pass": not bad, "results": [
+            {"len": L, "pass": not (bad and L == 24044)} for L in (8204, 9644, 24044)]}))
+    (tmp_path / "q32-U.rerun.vs.q32-U.replay.match.json").write_text(json.dumps({"pass": u_rerun_pass, "n": 8}))
+    (tmp_path / "runner.tsv").write_text("q32-U\tMRv2\tnone\tKV cache budget: 24 - 7.64 - 7.00 = 9.36 GiB\n")
+    r = subprocess.run(["python3", str(ROOT / "benchmarks/q32/summarize.py"), str(tmp_path), "--arms", "q32-U q32-Ut q32-F",
+                        "--windows", "1", "--workloads", "c1 c8 m5k-c8", "--run2",
+                        "--required", "q32-Ut:q32-U q32-F:q32-U"], capture_output=True, text=True)
+    return r
+
+
+def test_q32_run2_summary_relative_limit_replay_needles(tmp_path):
+    r = _run2_fixture(tmp_path)
+    assert r.returncode == 0, r.stdout + r.stderr
+    out = r.stdout
+    assert "U run twice on the same batch: identical" in out
+    assert "| q32-Ut | m5k-c8 |" in out and "| MRv2 |" in out
+    best = out.split("## Best eligible tested point per arm and workload", 1)[1]
+    assert "| q32-Ut | c" in best and "| q32-F | c" in best, best
+
+
+def test_q32_run2_relative_limit_fails_slower_arm(tmp_path):
+    out = _run2_fixture(tmp_path, ut_tpot_itl=0.03).stdout            # Ut TPOT 30 ms vs U 20 ms on m5k: > 1.1x
+    row = next(l for l in out.splitlines() if l.startswith("| q32-Ut | m5k-c8 |"))
+    assert "| FAIL |" in row, row
+    row_u = next(l for l in out.splitlines() if l.startswith("| q32-U | m5k-c8 |"))
+    assert "| PASS |" in row_u, row_u
+
+
+def test_q32_run2_replay_and_needles_gate_eligibility(tmp_path):
+    out = _run2_fixture(tmp_path, f_replay_pass=False, ut_needle_fail=True, u_rerun_pass=False).stdout
+    best = out.split("## Best eligible tested point per arm and workload", 1)[1]
+    assert "| q32-F | – | – | not eligible: replay differs on 1 prompt(s) (1 near-tie)" in best, best
+    assert "| q32-Ut | – | – | not eligible: needles failed at 24044" in best, best
+    assert "NOT identical: replay diffs are not attributable" in out
+    cmp = out.split("## Comparisons", 1)[1].split("##", 1)[0]
+    assert "(exploratory)" in cmp                                      # F's throughput stays visible, labelled

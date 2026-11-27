@@ -13,8 +13,9 @@ export VLLM_NEURON_COMPILATION_TIMEOUT=3600 VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=1
 mkdir -p logs
 [ "${DRYRUN:-0}" = 1 ] && cd "$(mktemp -d)"
 case "$ARM" in
-  q32-U|q32-T|q32-K|q32-F|q32-C)  # Qwen3-32B, TP8, 32K context, cap 0.5, identical config in every arm:
+  q32-U|q32-Ut|q32-T|q32-K|q32-F|q32-C)  # Qwen3-32B, TP8, 32K context, cap 0.5, identical config in every arm:
     #   U = pinned upstream vllm-neuron in its own venv (UPSTREAM_PY); provenance checked per process by q32/run.sh
+    #   Ut = the same upstream + decode_context_length_buckets [2048, 8192] (upstream feature; selects MRv1)
     #   T = this fork, flags off   K = in-kernel KV write only   F = dynamic FA only   C = both
     # cap 0.8 failed to load (2026-11-27): 7.64 GiB weights/core + 13.4 GiB KV left < 3 GiB for NEFFs. 0.5 -> 10.8 GiB KV,
     # enough for 8 seqs x 32K (8.6 GiB), ~5.5 GiB headroom. Checked by tests/covex/test_five_arms.py::test_hbm_budget.
@@ -22,15 +23,21 @@ case "$ARM" in
       # U: its own venv (a copy of the DLAMI venv with only pinned upstream installed); launched by absolute
       # interpreter from an empty working directory, so neither cwd nor the fork's install can supply vllm_neuron.
       q32-U) CORES=${Q32_CORES:-0-7}; VLLM=("${UPSTREAM_PY:?UPSTREAM_PY (upstream venv python) required}" -m vllm.entrypoints.cli.main) ;;
+      q32-Ut) CORES=${Q32_CORES:-16-23}; VLLM=("${UPSTREAM_PY:?UPSTREAM_PY (upstream venv python) required}" -m vllm.entrypoints.cli.main)
+              CTX='"decode_context_length_buckets":[2048,8192],' ;;
       q32-T) CORES=${Q32_CORES:-0-7} ;;
       q32-K) CORES=${Q32_CORES:-8-15}; export COVEX_QWEN3_INKERNEL_KV_WRITE=1 ;;
       q32-F) CORES=${Q32_CORES:-8-15}; export COVEX_DECODE_DYNAMIC_FA=1 ;;
       q32-C) CORES=${Q32_CORES:-8-15}; export COVEX_DECODE_DYNAMIC_FA=1 COVEX_QWEN3_INKERNEL_KV_WRITE=1 ;;
     esac
     export VLLM_NEURON_KV_GMU_BUDGET_CAP_FRACTION=0.5
+    # Equal explicit headroom in every arm (run 2): KV = 24 GiB - 7.64 GiB weights - 7 GiB = ~9.4 GiB >= 8.6 GiB for
+    # 8 x 32K, and 7 GiB for NEFFs + profiler buffers (run 1's cap-0.5 split left ~5.5 GiB and profiling failed).
+    # Ut loads extra context-bucket NEFFs, so a fixed KV fraction would leave it less room than the others.
+    export VLLM_NEURON_RESERVED_HEADROOM_GIB=${Q32_HEADROOM_GIB:-7}
     ARGS=("$M/Qwen3-32B" --served-model-name m --dtype bfloat16 --tensor-parallel-size 8 --max-model-len 32768
           --max-num-batched-tokens 8192 --max-num-seqs 8 --no-enable-prefix-caching
-          ); CFG='{"neuron_config":{"num_batched_tokens_buckets":[1024,8192],"num_seqs_buckets":[1,2,4,8],"on_device_sampling_config":{"all_greedy":true}}}' ;;
+          ); CFG="{\"neuron_config\":{${CTX:-}\"num_batched_tokens_buckets\":[1024,8192],\"num_seqs_buckets\":[1,2,4,8],\"on_device_sampling_config\":{\"all_greedy\":true}}}" ;;
   emb-U|emb-T|emb-C|emb-P4|emb-P8|emb-P16)  # Qwen3-Embedding-8B, TP8, tutorial config, identical in every arm except
     # the prefills packed per step: U = pinned upstream (own venv), T = fork 1 per step, P<N> = fork N per step
     # (C = legacy name for P16). Packing was KNOWN BROKEN (fail_on_recompile on max_query_len) until the canonical

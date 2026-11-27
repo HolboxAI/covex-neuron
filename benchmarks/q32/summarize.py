@@ -20,17 +20,24 @@ if STATUS and os.path.exists(STATUS):
         p = line.rstrip("\n").split("\t")
         if len(p) >= 3 and p[2].startswith("FAIL"):
             failed_steps.setdefault(p[0], []).append(f"{p[1]} {p[2]}"[:80])
-LOADS = (("c1", 8), ("c8", 32)); REQUIRED = [("q32-K", "q32-U"), ("q32-K", "q32-T")]
+# workload tag -> (prompts per window, fixed input length or None for a ranged workload); tags are bench file names
+WORKLOADS = {"c1": (8, 1024), "c8": (32, 1024), "m5k-c8": (16, None)}   # m5k = 4K-6K input (5120 +-20%), c8
+LOAD_TAGS = a[a.index("--workloads") + 1].split() if "--workloads" in a else ["c1", "c8"]
+LOADS = tuple((t, WORKLOADS[t][0]) for t in LOAD_TAGS)
+REQUIRED = ([tuple(x.split(":")) for x in a[a.index("--required") + 1].split()] if "--required" in a
+            else [("q32-K", "q32-U"), ("q32-K", "q32-T")])
+RUN2 = "--run2" in a   # run 2 eligibility adds the fixed-batch replay and the needles to the correctness gate
 
 
 def windows(arm, c, n):
     ds = [load(f"{R}/{arm}-{c}-w{w}.json") for w in range(1, W + 1)]
-    oks = [bench_ok(d, n, 256, 1024) for d in ds]
+    oks = [bench_ok(d, n, 256, WORKLOADS[c][1]) for d in ds]
     bad = [f"w{i + 1}: {why}" for i, (ok, why) in enumerate(oks) if not ok]
     return ds, bad
 
 
-LIMITS = {"ttft_p90_s": 2.0, "tpot_p90_ms": 50.0}   # pre-registered before run 2 (user + Astra)
+LIMITS = {"ttft_p90_s": 2.0, "tpot_p90_ms": 50.0}   # absolute, 1024/256 workloads only (pre-registered, user + Astra)
+RELATIVE = 1.10   # longer workloads: <= 1.1x U's own request p90 TTFT and TPOT on the same workload, same run
 
 
 def p90(xs):
@@ -68,9 +75,38 @@ def med(ds, k):
     return round(statistics.median(v), 2) if v else None
 
 
+def needles_ok(arm):
+    d = load(f"{R}/{arm}.needle.json")
+    if d is None:
+        return False, "needles not run"
+    res = d.get("results") or []
+    if len(res) != 3 or not d.get("pass") or not all(r.get("pass") for r in res):
+        return False, "needles failed at " + ", ".join(str(r.get("len")) for r in res if not r.get("pass")) if res else "needles empty"
+    return True, ""
+
+
+def replay_ok(arm):
+    d = load(f"{R}/{arm}.vs.q32-U.replay.match.json")
+    if d is None:
+        return False, "replay not run"
+    if not d.get("pass"):
+        mm = d.get("mismatches") or []
+        nt = sum(1 for m in mm if m.get("near_tie"))
+        return False, f"replay differs on {len(mm)} prompt(s) ({nt} near-tie)"
+    return True, ""
+
+
+def correctness(arm):
+    """Reasons an arm's tokens are not established equal to U's (empty = equal on every check run)."""
+    why = [f"cache c{k}: {m[1]}" for k in (1, 3) for m in [match_ok(f"{R}/{arm}.vs.q32-U.cache.c{k}.match.json", 18)] if not m[0]]
+    if RUN2:
+        why += [m[1] for m in (replay_ok(arm), needles_ok(arm)) if not m[0]]
+    return why
+
+
 print("## Per arm (unprofiled windows)\n")
 print("| Arm | Load | out tok/s per window | median tok/s | completed | TPOT p50 / p90 ms (window medians) | "
-      "TTFT p50 / p90 ms (window medians) | request p90 TTFT / TPOT | limits (2 s / 50 ms) | Status |")
+      "TTFT p50 / p90 ms (window medians) | request p90 TTFT / TPOT | limits (1K: 2 s / 50 ms; m5k: <= 1.1x U) | Status |")
 print("|---|---|---|---|---|---|---|---|---|---|")
 summary, limits = {}, {}
 for arm in ARMS:
@@ -81,8 +117,13 @@ for arm in ARMS:
                         for d in ds)
         done = sum((d or {}).get("completed", 0) for d in ds)
         rt, rp = request_p90s(ds)
-        lim = ("unknown (no per-request data)" if rt is None else
-               "PASS" if rt <= LIMITS["ttft_p90_s"] and rp <= LIMITS["tpot_p90_ms"] else "FAIL")
+        if WORKLOADS[c][1] is None:   # relative limit against U
+            ut, up = request_p90s(windows("q32-U", c, n)[0]) if "q32-U" in ARMS else (None, None)
+            lim = ("unknown (no per-request data)" if rt is None else "unknown (no U reference)" if ut is None else
+                   "PASS" if rt <= RELATIVE * ut and rp <= RELATIVE * up else "FAIL")
+        else:
+            lim = ("unknown (no per-request data)" if rt is None else
+                   "PASS" if rt <= LIMITS["ttft_p90_s"] and rp <= LIMITS["tpot_p90_ms"] else "FAIL")
         limits[(arm, c)] = lim
         rq = "–" if rt is None else f"{rt:.3f} s / {rp:.2f} ms"
         print(f"| {arm} | {c} | {per} | {summary[(arm, c)][0] or '–'} | {done}/{n * W} | {med(ds, 'median_tpot_ms')} / "
@@ -103,6 +144,8 @@ for arm in ARMS:
             steps = [f"{z} step failed: {f}" for z in (arm, ref) for f in failed_steps.get(z, [])][:2]
             hard = [f"{arm} {b}" for b in bx] + [f"{ref} {b}" for b in br] + [w for ok, w in work if not ok][:1] + steps
             corr_why = [f"cache c{k}: {m[1]}" for k, m in zip((1, 3), corr) if not m[0]]
+            if RUN2 and ref == "q32-U":
+                corr_why += [m[1] for m in (replay_ok(arm), needles_ok(arm)) if not m[0]]
             if arm in EXPLORATORY and not hard and corr_why and x and r:
                 # dynamic FA: keep throughput visible, labelled; tokens differ, so no equivalence or headline claim
                 print(f"| {arm} | {ref} | {c} | {x} | {r} | {x / r:.2f}x (exploratory) | tokens differ: {'; '.join(corr_why)} |")
@@ -119,21 +162,39 @@ for arm in [x for x in ARMS if x in EXPLORATORY]:
         bad = summary[(arm, c)][1]
         if bad or summary[(arm, c)][0] is None:
             incomplete.append(f"{arm} (requested exploratory arm) {c}: " + ("; ".join(bad) or "no valid windows"))
-print("\n## Best eligible tested point per arm\n")
+if RUN2:
+    print("\n## Correctness vs U (run 2)\n")
+    rr = load(f"{R}/q32-U.rerun.vs.q32-U.replay.match.json")
+    print(f"U run twice on the same batch: {'identical' if rr and rr.get('pass') else 'NOT identical: replay diffs are not attributable' if rr else 'not run'}\n")
+    print("| Arm | cache c1 | cache c3 | replay | needles 8,204 / 9,644 / 24,044 |\n|---|---|---|---|---|")
+    for arm in ARMS:
+        cells = [("ok" if m[0] else m[1]) for m in [match_ok(f"{R}/{arm}.vs.q32-U.cache.c{k}.match.json", 18) for k in (1, 3)]] \
+            if arm != "q32-U" else ["reference", "reference"]
+        cells += ["reference" if arm == "q32-U" else ("ok" if replay_ok(arm)[0] else replay_ok(arm)[1]),
+                  "ok" if needles_ok(arm)[0] else needles_ok(arm)[1]]
+        print(f"| {arm} | " + " | ".join(cells) + " |")
+    if os.path.exists(f"{R}/runner.tsv"):
+        print("\n## Runner and graphs per arm (from server logs)\n\n| Arm | runner | decode context buckets | KV budget line |\n|---|---|---|---|")
+        for line in open(f"{R}/runner.tsv"):
+            print("| " + " | ".join(line.rstrip("\n").split("\t")) + " |")
+print("\n## Best eligible tested point per arm and workload\n")
 print("Eligible = no failed run step (provenance, profile-independent steps included), all windows complete, request-level")
-print("p90 within the pre-registered limits, and (for non-U arms) exact cache-check agreement with U at c1 and c3.\n")
+print("p90 within the pre-registered limits, and (for non-U arms) exact cache-check agreement with U at c1 and c3"
+      + (", replay identical to U and all needles passing" if RUN2 else "") + ".\n")
 print("| Arm | Load | median tok/s | Note |\n|---|---|---|---|")
 HARD = ("ready", "provenance", "bench", "import")       # profile/evidence failures do not disqualify throughput
 for arm in ARMS:
     hard_fail = [f for f in failed_steps.get(arm, []) if f.split()[0].startswith(HARD)]
-    corr_ok = arm == "q32-U" or all(match_ok(f"{R}/{arm}.vs.q32-U.cache.c{k}.match.json", 18)[0] for k in (1, 3))
-    why = (["failed step: " + hard_fail[0]] if hard_fail else []) + ([] if corr_ok else ["tokens differ from U"])
-    ok = [(summary[(arm, c)][0], c) for c, _ in LOADS if not why and limits.get((arm, c)) == "PASS"
-          and summary[(arm, c)][0] and not summary[(arm, c)][1]]
-    if ok:
-        v, c = max(ok); print(f"| {arm} | {c} | {v} | tested points only (c1, c8); not a saturation sweep |")
-    else:
-        print(f"| {arm} | – | – | not eligible: {'; '.join(why) or 'no tested point passes the limits with complete windows'} |")
+    corr_why = [] if arm == "q32-U" else correctness(arm)
+    why = (["failed step: " + hard_fail[0]] if hard_fail else []) + corr_why
+    if why:
+        print(f"| {arm} | – | – | not eligible: {'; '.join(why)} |"); continue
+    for c, _ in LOADS:   # one row per workload: tok/s across different workloads are not comparable
+        v, bad = summary[(arm, c)]
+        if v and not bad and limits.get((arm, c)) == "PASS":
+            print(f"| {arm} | {c} | {v} | tested points only ({', '.join(LOAD_TAGS)}); not a saturation sweep |")
+        else:
+            print(f"| {arm} | {c} | – | not eligible here: {'; '.join(bad) or 'limit ' + str(limits.get((arm, c)))} |")
 for x in incomplete:
     print(f"INCOMPLETE (required): {x}")
 missing = [p for p in REQUIRED if p[0] not in ARMS or p[1] not in ARMS]
