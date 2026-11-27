@@ -681,7 +681,9 @@ def _get_activation_fn(act_fn: ActFnType):
     if act_fn == ActFnType.SiLU or act_fn == ActFnType.Swish:
         return torch.nn.functional.silu
     elif act_fn == ActFnType.GELU:
-        return torch.nn.functional.gelu
+        # Wrapped like the tanh variant: a bare F.gelu object reaches dynamo as the C builtin
+        # torch._C._nn.gelu and fails to trace (CPU-mode torch fallback, skip_gate MLPs).
+        return lambda x: torch.nn.functional.gelu(x)
     elif act_fn == ActFnType.GELU_Tanh_Approx:
         return lambda x: torch.nn.functional.gelu(x, approximate="tanh")
     else:

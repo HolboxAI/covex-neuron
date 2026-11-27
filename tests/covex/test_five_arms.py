@@ -29,7 +29,7 @@ def dry(arm, profile="0"):
     env = {"HOME": os.environ.get("HOME", "/tmp"), "PATH": os.environ["PATH"], "DRYRUN": "1", "PROFILE": profile}
     out = subprocess.run(["bash", str(SERVE), arm, "8000"], env=env, capture_output=True, text=True, check=True).stdout
     flags = re.search(r"flags=([A-Z0-9_ ]*)cfg=", out).group(1).split()
-    cfg = json.loads(out.split("cfg=", 1)[1])
+    cfg = json.loads(out.split("cfg=", 1)[1].splitlines()[0])
     text = SERVE.read_text()
     block = re.search(rf"\n  [^\n]*{re.escape(arm)}[^\n]*\)(.*?);;", text, re.S).group(1)
     return flags, cfg, block
@@ -321,3 +321,33 @@ def test_no_pkill_by_pattern_in_runners():
     for f in (ROOT / "benchmarks").rglob("*.sh"):
         code = "\n".join(l.split("#", 1)[0] for l in f.read_text().splitlines())
         assert "pkill" not in code, f"{f.relative_to(ROOT)} uses pkill"
+
+
+@pytest.mark.parametrize("arm", ARMS)
+@pytest.mark.parametrize("extra", ["", "--gpu-memory-utilization 0.2"])
+def test_final_vllm_argv_is_clean(arm, extra):
+    """The exact argv serve.sh would exec. A variable-name clash ($EXTRA) once injected '' and a JSON fragment as
+    positional args (emb-T/emb-C would have died on Trainium too; caught by rehearsal 1)."""
+    import shlex
+    env = {"HOME": os.environ.get("HOME", "/tmp"), "PATH": os.environ["PATH"], "DRYRUN": "1", "REHEARSAL_EXTRA": extra}
+    out = subprocess.run(["bash", str(SERVE), arm, "8000"], env=env, capture_output=True, text=True, check=True).stdout
+    argv = shlex.split(out.split("argv:", 1)[1].strip())
+    assert argv[:2] == ["vllm", "serve"]
+    assert "" not in argv, f"{arm}: empty argument in {argv}"
+    value_flags = {"--additional-config", "--profiler-config", "--hf-overrides"}
+    for i, tok in enumerate(argv):
+        if '":' in tok or tok.startswith("{"):
+            assert argv[i - 1] in value_flags, f"{arm}: config fragment {tok!r} passed as a bare argument"
+    if extra:
+        assert argv[argv.index("--gpu-memory-utilization") + 1] == "0.2"
+    else:
+        assert "--gpu-memory-utilization" not in argv
+
+
+def test_mlp_torch_fallback_activations_are_traceable():
+    """CPU-mode/torch fallback returned the bare F.gelu object; dynamo saw torch._C._nn.gelu and refused to trace
+    (asr-C in rehearsal 1). Every activation must be a Python callable dynamo can inline."""
+    src = (ROOT / "vllm_neuron/functional/mlp.py").read_text()
+    body = src[src.index("def _get_activation_fn"):]
+    body = body[:body.index("\ndef ")]
+    assert not re.search(r"return torch\.nn\.functional\.gelu\s*$", body, re.M), "return a lambda wrapper, not F.gelu"

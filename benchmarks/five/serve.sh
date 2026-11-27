@@ -4,7 +4,7 @@
 set -euo pipefail
 ARM=$1; PORT=$2; M=${MODELS_DIR:-$HOME/models}; TAG=${LOG_TAG:-}
 # REHEARSAL_EXTRA: extra vllm args for the CPU-mode rehearsal only (never set on Trainium).
-read -r -a EXTRA <<< "${REHEARSAL_EXTRA:-}"
+read -r -a REH_ARGS <<< "${REHEARSAL_EXTRA:-}"   # own name: arms use $EXTRA for config fragments
 export TORCH_DEVICE_BACKEND_AUTOLOAD=0 NEURON_LIBTORCH_COMPILATION_TIMEOUT=3600 NEURON_SKIP_EFA_AFFINITY=1
 export VLLM_NEURON_COMPILATION_TIMEOUT=3600 VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=1200
 mkdir -p logs
@@ -50,6 +50,8 @@ if [ "${PROFILE:-0}" = 1 ]; then   # vllm-neuron built-in profiler; records only
   PROF=(--profiler-config '{"profiler": "cuda"}')
 fi
 python3 -c 'import json,sys; json.loads(sys.argv[1])' "$CFG" || { echo "bad CFG for $ARM" >&2; exit 2; }
-if [ "${DRYRUN:-0}" = 1 ]; then echo "$ARM cores=$CORES flags=$(env | grep -oE '^COVEX_[A-Z_]+' | sort | tr '\n' ' ')cfg=$CFG"; exit 0; fi
+if [ "${DRYRUN:-0}" = 1 ]; then
+  echo "$ARM cores=$CORES flags=$(env | grep -oE '^COVEX_[A-Z_]+' | sort | tr '\n' ' ')cfg=$CFG"
+  printf 'argv:'; printf ' %q' vllm serve "${ARGS[@]}" ${REH_ARGS[@]+"${REH_ARGS[@]}"} --additional-config "$CFG" ${PROF[@]+"${PROF[@]}"} --port "$PORT"; echo; exit 0; fi
 { echo "arm=$ARM cores=$CORES profile=${PROFILE:-0}"; env | grep -E '^(COVEX|VLLM_NEURON|NEURON_VISIBLE)' | sort; printf '%q ' "${ARGS[@]}"; echo; echo "$CFG"; } > "logs/$ARM$TAG.meta"
-exec vllm serve "${ARGS[@]}" "${EXTRA[@]}" --additional-config "$CFG" "${PROF[@]}" --port "$PORT" > "logs/$ARM$TAG.server.log" 2>&1
+exec vllm serve "${ARGS[@]}" ${REH_ARGS[@]+"${REH_ARGS[@]}"} --additional-config "$CFG" ${PROF[@]+"${PROF[@]}"} --port "$PORT" > "logs/$ARM$TAG.server.log" 2>&1

@@ -8,7 +8,7 @@ MODEL_DIR=${MODEL_DIR:-$HOME/models/Qwen3-ASR-1.7B}
 arm_config "$ARM" > /dev/null; CFG=$(arm_config "$ARM")
 # vllm-neuron multiproc requires NEURON_VISIBLE_DEVICES (logical-core range "a-b"); NEURON_RT_VISIBLE_CORES is rejected.
 [ "${VLLM_NEURON_CPU_MODE:-0}" = 1 ] || export NEURON_VISIBLE_DEVICES="$((PAIR * 8))-$((PAIR * 8 + ARM_TP - 1))"
-read -r -a EXTRA <<< "${REHEARSAL_EXTRA:-}"
+read -r -a REH_ARGS <<< "${REHEARSAL_EXTRA:-}"   # own name: arms use $EXTRA for config fragments
 export TORCH_DEVICE_BACKEND_AUTOLOAD=0 NEURON_LIBTORCH_COMPILATION_TIMEOUT=1800 NEURON_SKIP_EFA_AFFINITY=1
 PROF_ARGS=()
 if [ "${PROFILE:-0}" = 1 ]; then
@@ -24,9 +24,9 @@ mkdir -p logs
 # from each other. SOLO=1 drops the pinning for the solo S2 re-run.
 CPUS="$((PAIR * 24))-$((PAIR * 24 + 23))"; PIN=(taskset -c "$CPUS"); [ "${SOLO:-0}" = 1 ] && PIN=()
 echo "cpus=${PIN[*]:-all}" >> "logs/$ARM${LOG_TAG:-}.meta"
-exec "${PIN[@]}" vllm serve "$MODEL_DIR" \
+exec ${PIN[@]+"${PIN[@]}"} vllm serve "$MODEL_DIR" \
   --served-model-name qwen3-asr-1.7b --dtype bfloat16 \
   --tensor-parallel-size "$ARM_TP" --max-model-len 1024 \
   --max-num-seqs 16 --max-num-batched-tokens 1024 \
   --limit-mm-per-prompt '{"audio": 1}' --no-enable-prefix-caching --mm-processor-cache-gb 0 \
-  --port "$PORT" "${PROF_ARGS[@]}" "${EXTRA[@]}" --additional-config "$CFG" > "logs/$ARM${LOG_TAG:-}.server.log" 2>&1
+  --port "$PORT" ${PROF_ARGS[@]+"${PROF_ARGS[@]}"} ${REH_ARGS[@]+"${REH_ARGS[@]}"} --additional-config "$CFG" > "logs/$ARM${LOG_TAG:-}.server.log" 2>&1
