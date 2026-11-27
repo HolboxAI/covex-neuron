@@ -344,6 +344,12 @@ class Qwen3Attention(nn.Module):
         )
 
         # Step 4: Attention — no sinks, no sliding window
+        # Packed prefill (max_prefills_per_batch > 1): several requests are concatenated into one sequence. Without
+        # per-request bounds a single causal attention lets request B attend to all of A's tokens. The segmented branch
+        # carries single-request prior metadata, so packing is only supported on the full-prefill branch.
+        packed_prefill = attn_metadata[layer_name].get("packed_prefill", False)
+        if packed_prefill and kv_segment_size:
+            raise NotImplementedError("packed prefill with segmented attention (prior context) is not supported")
         if kv_segment_size:
             attn_output = NF.segmented_attention(
                 q,
@@ -365,14 +371,35 @@ class Qwen3Attention(nn.Module):
             k_flash = k.transpose(1, 2)
             v_flash = v
 
-            attn_output = NF.flash_attention(
-                q_flash,
-                k_flash,
-                v_flash,
-                scale=self.scaling,
-                tp_q=False,
-                tp_out=True,
-            )
+            if packed_prefill:
+                # Each query token attends to [its request's first token, itself]: causal inside the request, nothing
+                # across requests. A full prefill has no prior context, so positions restart at 0 per request and the
+                # request start of token t is t - positions[t]. Same bounds form as the Qwen3-ASR encoder.
+                tok_idx = torch.arange(tokens, device=positions.device, dtype=torch.int32)
+                req_start = (tok_idx - positions.reshape(-1)[:tokens].to(torch.int32)).clamp(min=0)
+                nh = q_flash.shape[0]
+                bound_min = req_start.view(1, tokens, 1).expand(nh, tokens, 1).contiguous()
+                bound_max = (tok_idx + 1).view(1, tokens, 1).expand(nh, tokens, 1).contiguous()
+                attn_output = NF.flash_attention(
+                    q_flash,
+                    k_flash,
+                    v_flash,
+                    scale=self.scaling,
+                    causal_mask=False,
+                    tp_q=False,
+                    tp_out=True,
+                    bound_min=bound_min,
+                    bound_max=bound_max,
+                )
+            else:
+                attn_output = NF.flash_attention(
+                    q_flash,
+                    k_flash,
+                    v_flash,
+                    scale=self.scaling,
+                    tp_q=False,
+                    tp_out=True,
+                )
 
         # Step 5: Output projection
         attn_output = attn_output.unsqueeze(0)

@@ -1032,3 +1032,27 @@ def test_decode_step_requires_all_ranks_and_ignores_wrapper_slices():
     plain = ds.analyze({r: rank(False) for r in range(8)}, 1)
     wrapped = ds.analyze({r: rank(True) for r in range(8)}, 1)
     assert plain["exposed_ms"] > 0 and abs(wrapped["exposed_ms"] - plain["exposed_ms"]) < 1e-12, (plain, wrapped)
+
+
+def test_packed_prefill_bounds_are_block_diagonal_causal():
+    """Packed prefill ran ONE causal attention over concatenated requests, so request B attended to all of A.
+    The bounds rule start = t - positions[t], [start, t+1) must give a block-diagonal causal mask: every real token
+    sees exactly its own request's earlier tokens, never another request's or the padding."""
+    src = (ROOT / "vllm_neuron/model/qwen3/model.py").read_text()
+    assert "req_start = (tok_idx - positions.reshape(-1)[:tokens].to(torch.int32)).clamp(min=0)" in src
+    assert "bound_max = (tok_idx + 1)" in src and "causal_mask=False" in src
+    lens = [5, 3, 4]; pad = 4                                   # 3 packed requests + bucket padding
+    positions = [p for n in lens for p in range(n)] + [0] * pad
+    T = len(positions); owner = [i for i, n in enumerate(lens) for _ in range(n)] + [None] * pad
+    for t in range(T):
+        lo, hi = max(t - positions[t], 0), t + 1
+        if owner[t] is None:
+            continue                                            # padding rows are never read back
+        allowed = set(range(lo, hi))
+        expect = {s for s in range(T) if owner[s] == owner[t] and s <= t}
+        assert allowed == expect, (t, allowed, expect)
+    # the stock (single request) case reduces to plain causal attention
+    positions = list(range(7))
+    assert all(set(range(max(t - positions[t], 0), t + 1)) == set(range(t + 1)) for t in range(7))
+    runner = (ROOT / "vllm_neuron/vllm/worker/neuron_model_runner.py").read_text()
+    assert runner.count('"packed_prefill": getattr(self, "max_prefills_per_batch", 1) > 1') == 2
