@@ -1000,7 +1000,6 @@ def test_packed_prefill_max_query_len_is_one_value_per_bucket():
     """emb-C crashed with fail_on_recompile: the compiled guard was max_query_len == 128 and packed steps passed the
     longest request's padded length instead. Every packed prefill in a bucket must carry the same value; stock
     (single prefill) and decode must be unchanged."""
-    import importlib.util, types, sys as _s
     src = (ROOT / "vllm_neuron/utils/bucket_utils.py").read_text()
     fn_src = src[src.index("def canonical_prefill_max_query_len"):]
     ns = {}; exec(fn_src, ns); f = ns["canonical_prefill_max_query_len"]
@@ -1098,7 +1097,11 @@ def test_decode_step_matches_ranks_by_time_not_position():
     ranks[3] = rank(skip_first=True, extra_late=True)
     out = ds.analyze(ranks, 1)
     assert "error" not in out and abs(out["step_ms"] - 1.0) < 1e-9, out
-    assert abs(out["idle_before_next_ms"] - 9.0) < 1e-9, out                 # 10 ms period - 1 ms step
+    assert abs(out["decode_to_decode_gap_ms"] - 9.0) < 1e-9 and out["unexplained_gap_ms"] == out["decode_to_decode_gap_ms"], out
+    # Astra's repro: a 7 ms prefill between decodes is device work, not idle
+    with_prefill = {r: v + [("prefill", 10_000_000 * i + 1_500_000, 7_000_000, 0) for i in range(12)] for r, v in ranks.items()}
+    out = ds.analyze(with_prefill, 1)
+    assert abs(out["other_device_work_in_gap_ms"] - 7.0) < 1e-9 and abs(out["unexplained_gap_ms"] - 2.0) < 1e-9, out
     # clocks so far apart that no step lines up -> unknown, not a fabricated number
     skewed = {r: [(n, ts + r * 3_000_000, d, dep) for n, ts, d, dep in rank()] for r in range(8)}
     assert "error" in ds.analyze(skewed, 1)
@@ -1118,3 +1121,23 @@ def test_q32_summary_request_level_p90_and_limits(tmp_path):
     # q32-K c8: 32 requests, one slow (5 s): the request-level p90 is 0.5 s, the outlier is the p97 -> PASS at 2 s
     assert "0.500 s / 20.00 ms" in k_c8 and "| PASS |" in k_c8, k_c8
     assert "| q32-K | c8 | 120.0 | tested points only" in r.stdout, r.stdout
+
+
+
+def test_q32_request_p90_requires_complete_detailed_data_and_can_fail(tmp_path):
+    """Astra: 32 completed requests with only 28 TTFT/ITL records passed the gate. It must be unknown. And enough slow
+    requests must actually push p90 over the limit (one slow request in 32 correctly does not)."""
+    def bench(n, ttfts, itl_s=0.02):
+        return {"num_prompts": n, "completed": n, "failed": 0, "total_output_tokens": n * 256, "total_input_tokens": n * 1024,
+                "output_throughput": 100.0, "median_tpot_ms": 10.0, "median_ttft_ms": 50.0,
+                "ttfts": ttfts, "itls": [[itl_s] * 255 for _ in range(len(ttfts))]}
+    def run(c8_ttfts):
+        for arm in ("q32-U", "q32-T", "q32-K"):
+            (tmp_path / f"{arm}-c1-w1.json").write_text(json.dumps(bench(8, [0.1] * 8)))
+            (tmp_path / f"{arm}-c8-w1.json").write_text(json.dumps(bench(32, c8_ttfts)))
+        r = subprocess.run(["python3", str(ROOT / "benchmarks/q32/summarize.py"), str(tmp_path), "--arms", "q32-U q32-T q32-K",
+                            "--windows", "1"], capture_output=True, text=True)
+        return next(l for l in r.stdout.splitlines() if l.startswith("| q32-K | c8 |"))
+    assert "unknown (no per-request data)" in run([0.1] * 28)          # 28 records for 32 completed
+    assert "| FAIL |" in run([0.1] * 28 + [3.0] * 4)                   # 4 of 32 at 3 s -> p90 = 3 s > 2 s
+    assert "| PASS |" in run([0.1] * 31 + [3.0])                       # 1 of 32 slow -> p90 = 0.1 s

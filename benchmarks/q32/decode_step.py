@@ -70,7 +70,14 @@ def pick_steps(ranks):
                 ok = False; break
             i = hits[0]; x = seq[i]
             win[r] = (x[1], x[1] + x[2])
-            idle[r] = (seq[i + 1][1] - (x[1] + x[2])) if i + 1 < len(seq) else None
+            if i + 1 < len(seq):
+                g0, g1 = x[1] + x[2], seq[i + 1][1]
+                # other top-level device work inside the gap (e.g. a prefill), so the gap is not called "idle"
+                other = [(max(ts, g0), min(ts + d, g1)) for n2, ts, d, dep in ranks[r] if dep == 0 and n2 != dec
+                         and ts < g1 and ts + d > g0]
+                idle[r] = (g1 - g0, union(other))
+            else:
+                idle[r] = None
         if ok:
             cands.append((max(e for _, e in win.values()) - min(s for s, _ in win.values()), k, win, idle))
     if not cands:
@@ -108,9 +115,16 @@ def analyze(ranks, layers, tp=8):
                 comp.append(iv)
     out = {"step_index": k, "step_ms": (t1 - t0) / 1e6, "ranks": len(ranks)}
     gaps = [g for g in idle.values() if g is not None]
-    # device idle before the next decode step = time the device waited for the host to enqueue it (sampling ->
-    # next enqueue); the host side itself needs a system/host trace, so this is the device-observed upper bound
-    out["idle_before_next_ms"] = (max(gaps) / 1e6) if len(gaps) == len(idle) else "unknown"
+    # Gap between this decode execution and the next one, on the device clock. Not "idle": other device work (a
+    # prefill) can sit inside it, reported separately; what remains is unexplained (host scheduling, enqueue, DMA
+    # prefetch). Host-side waiting needs the host timestamps (COVEX_STEP_TIMING) / py-spy, not this trace.
+    if len(gaps) == len(idle):
+        worst = max(gaps, key=lambda g: g[0])
+        out["decode_to_decode_gap_ms"] = worst[0] / 1e6
+        out["other_device_work_in_gap_ms"] = worst[1] / 1e6
+        out["unexplained_gap_ms"] = (worst[0] - worst[1]) / 1e6
+    else:
+        out["decode_to_decode_gap_ms"] = out["other_device_work_in_gap_ms"] = out["unexplained_gap_ms"] = "unknown"
     missing = [r for r in ranks if not per_rank_coll.get(r)]
     if coll and missing:
         out.update(exposed_ms="unknown", attn_ms="unknown", mlp_ms="unknown", overlap_ms="unknown",
@@ -161,12 +175,13 @@ if __name__ == "__main__":
     tp = int(a[a.index("--tp") + 1]) if "--tp" in a else 8
     arms = [x for x in a if "=" in x]
     print("| Arm | Ranks | Step (ms, once across ranks) | Exposed all-reduce wait (ms) | after attention | after MLP | "
-          "Comm overlapped with compute (ms) | Device idle before next step (ms) | Note |")
-    print("|---|---|---|---|---|---|---|---|---|")
+          "Comm overlapped with compute (ms) | Decode-to-decode gap (ms) | other device work in gap | unexplained | Note |")
+    print("|---|---|---|---|---|---|---|---|---|---|---|")
     for spec in arms:
         arm, d = spec.split("=", 1)
         r = analyze(load_dir(d), layers, tp)
         if "error" in r:
-            print(f"| {arm} | – | unknown | unknown | unknown | unknown | unknown | unknown | {r['error']} |"); continue
+            print(f"| {arm} | – | unknown | unknown | unknown | unknown | unknown | unknown | unknown | unknown | {r['error']} |"); continue
         print(f"| {arm} | {r['ranks']} | {fmt(r['step_ms'])} | {fmt(r['exposed_ms'])} | {fmt(r['attn_ms'])} | "
-              f"{fmt(r['mlp_ms'])} | {fmt(r['overlap_ms'])} | {fmt(r['idle_before_next_ms'])} | {r.get('note', '')} |")
+              f"{fmt(r['mlp_ms'])} | {fmt(r['overlap_ms'])} | {fmt(r['decode_to_decode_gap_ms'])} | "
+              f"{fmt(r['other_device_work_in_gap_ms'])} | {fmt(r['unexplained_gap_ms'])} | {r.get('note', '')} |")

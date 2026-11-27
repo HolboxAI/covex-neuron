@@ -41,12 +41,19 @@ def p90(xs):
 def request_p90s(ds):
     """p90 TTFT (s) and TPOT (ms) over INDIVIDUAL requests pooled across windows (vllm bench --save-detailed:
     per-request `ttfts` and `itls`). Falls back to None when per-request data is absent; never a median of p90s."""
+    import math
+    ok = lambda x: isinstance(x, (int, float)) and math.isfinite(x) and x >= 0
     tt, tp = [], []
     for d in ds:
         if not d or not isinstance(d.get("ttfts"), list) or not isinstance(d.get("itls"), list):
             return None, None
-        tt += [x for x in d["ttfts"] if isinstance(x, (int, float))]
-        tp += [1000 * sum(x) / len(x) for x in d["itls"] if isinstance(x, list) and x]
+        n = d.get("completed")
+        # exactly one valid, finite record per completed request in EVERY window, or the limit is unknown
+        if len(d["ttfts"]) != n or len(d["itls"]) != n or not all(ok(x) for x in d["ttfts"]):
+            return None, None
+        if not all(isinstance(x, list) and x and all(ok(y) for y in x) for x in d["itls"]):
+            return None, None
+        tt += d["ttfts"]; tp += [1000 * sum(x) / len(x) for x in d["itls"]]
     return p90(tt), p90(tp)
 
 
