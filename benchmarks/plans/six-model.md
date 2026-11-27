@@ -53,8 +53,8 @@ Each instance is a trn2.48xlarge with 16 chips.
 
 | Instance | Arms (T + C per model; R where it differs from T) | Chips |
 |---|---|---|
-| A | Qwen3-32B T/C (4); ASR T/C (4) + C-T4 (1) + C-LNC1 (1); Llama R on TP8 (2) + T, C, T-no77 on TP4 (3) | 15 |
-| B | Embedding T/C (4), VL T/C (2), GPT-OSS T/C (4) | 10 |
+| A | Qwen3-32B T/C (4); ASR T/C (4) + C-T4 (1) + C-LNC1 (1); Llama R on TP8 (2) | 12 |
+| B | Embedding T/C (4), VL T/C (2), GPT-OSS T/C (4), Llama T, C, T-no77 on TP4 (3) | 13 |
 
 - Separate compile caches for the nki-library arms.
 - No pre-seeded caches for flag arms.
