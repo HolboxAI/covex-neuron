@@ -62,6 +62,35 @@ def vl(port, d, n, conc, out):
     json.dump(summary(n, conc, wall, lat, {"out_tok_per_s": round(toks / wall, 2), "answers": answers,
                "completion_tokens": token_counts}), open(out, "w"))
 
+def vlstage(port, d, n, out):
+    """Serial (c1) stage split for one VL arm: per image, the full request (image + question, max_tokens 1) and the same
+    question without the image (max_tokens 1); image cost = full - text-only (vision encoder + image-token prefill),
+    and the full answer request gives the decode tail. Medians over n images; diagnostic, not a scored window."""
+    d = Path(d); man = json.load(open(d / "manifest.json"))
+    def body(m, with_image, max_tokens):
+        content = [{"type": "text", "text": m["question"] + "\nAnswer with the option letter only."}]
+        if with_image:
+            img = base64.b64encode((d / "images" / m["image"]).read_bytes()).decode()
+            content.insert(0, {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{img}"}})
+        return {"model": "m", "messages": [{"role": "user", "content": content}], "max_tokens": max_tokens, "temperature": 0}
+    rows = []
+    with httpx.Client(timeout=600) as c:
+        for i in range(n):
+            m = man[i % len(man)]
+            t = {}
+            for k, (img, mt) in {"text_only_1tok": (False, 1), "image_1tok": (True, 1), "image_full": (True, PROBE_TOKENS)}.items():
+                t0 = time.perf_counter(); r = c.post(f"http://127.0.0.1:{port}/v1/chat/completions", json=body(m, img, mt))
+                r.raise_for_status(); t[k] = time.perf_counter() - t0
+            rows.append(t)
+    med = {k: statistics.median(r[k] for r in rows) for k in rows[0]}
+    full = med["image_full"]
+    out_obj = {"n": n, "median_s": med, "image_cost_s": med["image_1tok"] - med["text_only_1tok"],
+               "decode_tail_s": full - med["image_1tok"],
+               "image_share_of_request": (med["image_1tok"] - med["text_only_1tok"]) / full if full > 0 else None,
+               "max_latency_gain_if_image_cost_zero": full / (full - (med["image_1tok"] - med["text_only_1tok"]))
+               if full > (med["image_1tok"] - med["text_only_1tok"]) else None}
+    json.dump(out_obj, open(out, "w"), indent=1)
+
 def gen(port, out):
     make = lambda c, i: c.post(f"http://127.0.0.1:{port}/v1/completions",
                                json={"model": "m", "prompt": PROMPTS[i], "max_tokens": PROBE_TOKENS, "temperature": 0})
@@ -189,4 +218,5 @@ def smoke(kind, port, model="m", data=""):
 if __name__ == "__main__":
     cmd, *a = sys.argv[1:]
     {"emb": lambda: emb(a[0], a[1], int(a[2]), int(a[3]), a[4]), "vl": lambda: vl(a[0], a[1], int(a[2]), int(a[3]), a[4]),
+     "vlstage": lambda: vlstage(a[0], a[1], int(a[2]), a[3]),
      "gen": lambda: gen(a[0], a[1]), "match": lambda: match(a[0], a[1]), "smoke": lambda: smoke(*a), "cachecheck": lambda: cachecheck(*a)}[cmd]()

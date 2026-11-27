@@ -128,6 +128,8 @@ def measure(model, arm, port, cwd, env, model_path, data, windows, cpus, limit):
     if model.kind == "gen":
         for c in (1, 3):
             call([sys.executable, CLIENT, "cachecheck", port, f"cache-c{c}.json", c, 32])
+    if model.kind == "vl":   # serial stage split (diagnostic, before the scored windows): how much is the image
+        call([sys.executable, CLIENT, "vlstage", port, data / "vl", 10, "vl-stage.json"])
     for c in model.loads:
         for w in ("warm", *range(1, windows + 1)):
             dest = f"c{c}-w{w}.json"

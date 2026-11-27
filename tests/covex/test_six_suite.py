@@ -93,3 +93,32 @@ def test_asr_replica_row_layout_and_labels():
     import pytest
     with pytest.raises(ValueError):
         six.check_wave_fits(tuple(w for wave in six.WAVES for w in wave))   # all models in one wave cannot fit
+
+
+def test_vlstage_splits_image_cost_from_decode(tmp_path):
+    """vlstage against a stub whose latency is 0.05 s base + 0.2 s with an image + 0.01 s per output token."""
+    import os, subprocess, sys, threading, time
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    d = tmp_path / "vl"; (d / "images").mkdir(parents=True)
+    (d / "images/a.jpg").write_bytes(b"\xff\xd8fake")
+    (d / "manifest.json").write_text(json.dumps([{"image": "a.jpg", "question": "Q?"}]))
+    class H(BaseHTTPRequestHandler):
+        def log_message(self, *a): pass
+        def do_POST(self):
+            b = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            img = any(x.get("type") == "image_url" for x in b["messages"][0]["content"])
+            time.sleep(0.05 + (0.2 if img else 0) + 0.01 * b["max_tokens"])
+            out = json.dumps({"choices": [{"message": {"content": "A"}}], "usage": {"completion_tokens": b["max_tokens"]}}).encode()
+            self.send_response(200); self.send_header("Content-Length", str(len(out))); self.end_headers(); self.wfile.write(out)
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), H); threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        out = tmp_path / "s.json"
+        r = subprocess.run([sys.executable, str(Path(__file__).resolve().parents[2] / "benchmarks/five/clients.py"), "vlstage",
+                            str(srv.server_port), str(d), "3", str(out)], capture_output=True, text=True, timeout=60,
+                           env=dict(os.environ, PROBE_TOKENS="8"))
+    finally:
+        srv.shutdown()
+    assert r.returncode == 0, r.stderr
+    s = json.load(open(out))
+    assert abs(s["image_cost_s"] - 0.2) < 0.05 and s["decode_tail_s"] > 0.04, s
+    assert 0 < s["image_share_of_request"] < 1 and s["max_latency_gain_if_image_cost_zero"] > 1
