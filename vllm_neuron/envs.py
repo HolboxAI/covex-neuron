@@ -56,6 +56,8 @@ if TYPE_CHECKING:
     COVEX_QWEN3_INKERNEL_KV_WRITE: bool = False
     COVEX_FORCE_PACKED_ATTENTION: bool = False
     COVEX_PACK_TRACE: bool = False
+    # Omit padding tokens from the GPT-OSS BF16 prefill expert block mapping.
+    COVEX_GPT_OSS_SKIP_PADDED_ROUTES: bool = False
     # COVEX: fold Qwen3-ASR encoder norm2 (LayerNorm) into the audio MLP NKI kernel. Off by default.
     COVEX_ASR_ENCODER_LN_IN_MLP: bool = False
     VLLM_NEURON_RESERVED_HEADROOM_GIB: float | None = None
@@ -357,6 +359,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Diagnostic: one INFO line per prefill step with its members (request id, start offset, real and padded tokens),
     # the padded total and the request-row bucket, so a client can prove two inputs shared one packed Neuron step.
     "COVEX_PACK_TRACE": lambda: maybe_convert_bool(os.getenv("COVEX_PACK_TRACE")) or False,
+    "COVEX_GPT_OSS_SKIP_PADDED_ROUTES": lambda: (
+        maybe_convert_bool(os.getenv("COVEX_GPT_OSS_SKIP_PADDED_ROUTES")) or False
+    ),
     "COVEX_VL_VISION_MLP_NKI": lambda: (
         maybe_convert_bool(os.getenv("COVEX_VL_VISION_MLP_NKI")) or False
     ),

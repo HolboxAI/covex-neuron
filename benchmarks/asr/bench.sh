@@ -7,7 +7,9 @@ ARM=$1; PORT=$2; N=${3:-200}; CONC=${4:-1,4,8,16}; ROUNDS=${ROUNDS:-3}
 PIN=(taskset -c "$(( (PORT - 8000) * 24 ))-$(( (PORT - 8000) * 24 + 23 ))"); [ "${SOLO:-0}" = 1 ] && PIN=()
 CLIENT_DIR=${CLIENT_DIR:-$HOME/qwen3-asr-inference-cuda-trainium}
 [ -d "$CLIENT_DIR" ] || git clone -q https://github.com/HolboxAI/qwen3-asr-inference-cuda-trainium "$CLIENT_DIR"
-[ -d "$CLIENT_DIR/.git" ] && git -C "$CLIENT_DIR" checkout -q 4ce1ddb   # same client and dataset slice as the CUDA (1xL4, 8xL4) baselines
+if [ -d "$CLIENT_DIR/.git" ] && [ "$(git -C "$CLIENT_DIR" rev-parse HEAD)" != "$(git -C "$CLIENT_DIR" rev-parse 4ce1ddb)" ]; then
+  git -C "$CLIENT_DIR" checkout -q 4ce1ddb
+fi   # same client and dataset slice as the CUDA (1xL4, 8xL4) baselines
 mkdir -p results metrics
 curl -sf "http://127.0.0.1:$PORT/health" > /dev/null || { echo "arm $ARM (port $PORT) is not up" >&2; exit 3; }   # never report success for a skipped arm
 run_client() {  # out concurrency phases warmup rounds samples

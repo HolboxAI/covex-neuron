@@ -32,6 +32,7 @@ from vllm.distributed.parallel_state import get_tp_group
 from vllm.model_executor.models.interfaces import SupportsEagle3
 
 import vllm_neuron.functional as NF
+from vllm_neuron import envs
 from vllm_neuron.functional.attention.attention_decode import (
     _swizzle_packed_k,
     _unswizzle_packed_k,
@@ -1087,6 +1088,7 @@ class GptOssExperts(nn.Module):
             self.wide_ep_group = get_wide_ep_group()
 
         self.total_num_experts = config.num_local_experts
+        self.skip_padded_routes = envs.COVEX_GPT_OSS_SKIP_PADDED_ROUTES
 
         # Linear placement: EP rank k owns experts [k*L .. (k+1)*L)
         self.num_local_experts = config.num_local_experts // self.ep_degree
@@ -1433,6 +1435,7 @@ class GptOssExperts(nn.Module):
             moe_group=self.ep_tp_group,
             tp_degree=self.tp_degree,
             padding_mask=padding_mask,
+            skip_padded_routes=self.skip_padded_routes,
         )
 
         output = NF.moe_cte(

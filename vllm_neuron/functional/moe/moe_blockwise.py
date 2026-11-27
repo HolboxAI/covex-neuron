@@ -30,6 +30,7 @@ def build_blockwise_mapping(
     moe_group: "GroupCoordinator",
     tp_degree: int = 1,
     padding_mask: Optional[Tensor] = None,
+    skip_padded_routes: bool = False,
 ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
     """
     Build blockwise token-to-expert mapping for the kernel.
@@ -57,6 +58,8 @@ def build_blockwise_mapping(
             independently with no collectives. Defaults to 1.
         padding_mask: [T,] boolean mask where True = real token, False = padding.
             If not specified, all tokens are treated as real.
+        skip_padded_routes: exclude masked tokens from block assignments as well
+            as zeroing their affinities. Consumers must support token id -1.
 
     Returns:
         expert_affinities_masked: [T*E_local, 1] flattened affinities for kernel
@@ -91,10 +94,12 @@ def build_blockwise_mapping(
     total_tokens = expert_affinities.shape[0]
     device = expert_affinities.device
 
-    expert_mask = (expert_affinities != 0).to(torch.float32)
-    expert_affinities_masked = _apply_padding_mask(
-        expert_affinities, padding_mask
-    ).view(-1, 1)  # [T*E_local, 1]
+    masked_affinities = _apply_padding_mask(expert_affinities, padding_mask)
+    # The BF16 shard-on-block kernel treats token id -1 as a skipped token DMA.
+    # Omit zero-weight padding slots when constructing that kernel's map.
+    mapping_affinities = masked_affinities if skip_padded_routes else expert_affinities
+    expert_mask = (mapping_affinities != 0).to(torch.float32)
+    expert_affinities_masked = masked_affinities.view(-1, 1)
 
     # Kernel configs
     max_chunk_size = 16384

@@ -56,9 +56,11 @@ def vl(port, d, n, conc, out):
                       json={"model": "m", "messages": [{"role": "user", "content": content}], "max_tokens": PROBE_TOKENS, "temperature": 0})
     asyncio.run(run_pool(2, 2, make))
     wall, lat, outs = asyncio.run(run_pool(n, conc, make))
-    toks = sum(o["usage"]["completion_tokens"] for o in outs.values())
+    token_counts = [outs[i]["usage"]["completion_tokens"] for i in range(n)]
+    toks = sum(token_counts)
     answers = [outs[i]["choices"][0]["message"]["content"] for i in range(min(20, n))]
-    json.dump(summary(n, conc, wall, lat, {"out_tok_per_s": round(toks / wall, 2), "answers": answers}), open(out, "w"))
+    json.dump(summary(n, conc, wall, lat, {"out_tok_per_s": round(toks / wall, 2), "answers": answers,
+               "completion_tokens": token_counts}), open(out, "w"))
 
 def gen(port, out):
     make = lambda c, i: c.post(f"http://127.0.0.1:{port}/v1/completions",
@@ -71,14 +73,17 @@ def gen(port, out):
 # generated tokens crosses 8192 during decode (the dynamic-FA threshold). Ids 1000..19999: ordinary BPE tokens.
 CACHE_LENGTHS = [1, 31, 32, 33, 127, 128, 129, 511, 512, 513, 1023, 1024, 1025, 2049, 4095, 4096, 4097, 8190]
 
+def cache_prompts():
+    import random
+    rng = random.Random(0)
+    return [[rng.randrange(1000, 20000) for _ in range(n)] for n in CACHE_LENGTHS]
+
 
 def cachecheck(port, out, conc="1", gen_tokens="32"):
     """Greedy output TOKEN IDS for exact-length prompts (return_token_ids -> choices[0].token_ids), so two arms that
     decode to the same text through different ids still differ. conc 3 pads decode batches to the 4-bucket.
     Fails loudly unless every prompt returns exactly gen_tokens ids."""
-    import random
-    rng = random.Random(0)
-    prompts = [[rng.randrange(1000, 20000) for _ in range(n)] for n in CACHE_LENGTHS]
+    prompts = cache_prompts()
     g = int(gen_tokens)
     make = lambda c, i: c.post(f"http://127.0.0.1:{port}/v1/completions",
                                json={"model": "m", "prompt": prompts[i], "max_tokens": g, "temperature": 0,

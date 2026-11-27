@@ -57,8 +57,8 @@ case "$ARM" in
     ARGS=("$M/Qwen3-Embedding-8B" --served-model-name m --runner pooling --dtype bfloat16 --tensor-parallel-size 8
           --max-model-len 4096 --max-num-batched-tokens 4096 --max-num-seqs 32 --no-enable-prefix-caching
           ); CFG="{\"neuron_config\":{${EXTRA}\"num_batched_tokens_buckets\":[128,256,512,1024,2048,4096]}}" ;;
-  vl-T|vl-C)  # Qwen3-VL-32B, TP4 (1 chip), tutorial BF16 config; C = vision MLP on NKI kernel + LayerNorm fold
-    [ "$ARM" = vl-T ] && CORES=48-51 || { CORES=52-55; export COVEX_VL_VISION_MLP_NKI=1 COVEX_VL_VISION_LN_IN_MLP=1; }
+  vl-U|vl-T|vl-C)  # Qwen3-VL-32B, TP4 (1 chip), tutorial BF16 config; C = vision MLP on NKI kernel + LayerNorm fold
+    [ "$ARM" != vl-C ] && CORES=48-51 || { CORES=52-55; export COVEX_VL_VISION_MLP_NKI=1 COVEX_VL_VISION_LN_IN_MLP=1; }
     # 66.7 GB weights over TP4 = 15.5 GiB/core; default cap 0.30 leaves ~2.4 GiB for NEFFs (same margin that failed
     # Qwen3-32B). 0.15 -> 3.2 GiB KV (4 seqs x 8K needs 2 GiB), ~5.3 GiB headroom. Same in T and C.
     export VLLM_NEURON_KV_GMU_BUDGET_CAP_FRACTION=0.15
@@ -66,13 +66,27 @@ case "$ARM" in
     ARGS=("$M/Qwen3-VL-32B-Instruct" --served-model-name m --max-model-len 8192 --max-num-batched-tokens 8192
           --max-num-seqs 4 --tensor-parallel-size 4 --no-enable-prefix-caching
           ); CFG='{"neuron_config":{"quantization":"bf16","num_batched_tokens_buckets":[8192],"num_seqs_buckets":[4],"on_device_sampling_config":{"all_greedy":true}},"encoder_neuron_config":{"num_encoder_input_buckets":[2048],"encoder_attention_block_size":2048}}' ;;
-  oss-T)  # GPT-OSS-20B, TP8, tutorial config (stock only; no COVEX change applies to it)
+  oss-U|oss-P|oss-T|oss-U8k|oss-P8k)  # GPT-OSS-20B BF16. P omits padded tokens from prefill expert routing.
     CORES=56-63
+    case $ARM in
+      oss-U|oss-P) OSS_BUCKETS='[1024,8192]' ;;
+      *) OSS_BUCKETS='[8192]' ;;  # Legacy T and the forced-padding diagnostic
+    esac
+    case $ARM in oss-P|oss-P8k) export COVEX_GPT_OSS_SKIP_PADDED_ROUTES=1 ;; esac
     ARGS=("$M/gpt-oss-20b" --served-model-name m --tensor-parallel-size 8 --max-model-len 16384
           --max-num-batched-tokens 8192 --max-num-seqs 4 --no-enable-prefix-caching --hf-overrides '{"quantization_config": {}}'
-          ); CFG='{"neuron_config":{"num_batched_tokens_buckets":[8192],"num_seqs_buckets":[4],"on_device_sampling_config":{"all_greedy":true}}}' ;;
+          ); CFG="{\"neuron_config\":{\"num_batched_tokens_buckets\":$OSS_BUCKETS,\"num_seqs_buckets\":[4],\"on_device_sampling_config\":{\"all_greedy\":true}}}" ;;
+  llama-U|llama-F)
+    CORES=0-7
+    if [ "$ARM" = llama-F ]; then export COVEX_DECODE_DYNAMIC_FA=1; fi
+    ARGS=("$M/Llama-3.1-8B-Instruct" --served-model-name m --dtype bfloat16 --tensor-parallel-size 8
+          --max-model-len 16384 --max-num-batched-tokens 8192 --max-num-seqs 8 --no-enable-prefix-caching)
+    CFG='{"neuron_config":{"num_batched_tokens_buckets":[1024,8192],"num_seqs_buckets":[1,2,4,8],"on_device_sampling_config":{"all_greedy":true}}}' ;;
   *) echo "unknown arm $ARM" >&2; exit 2 ;;
 esac
+case "$ARM" in vl-U|oss-U|oss-U8k|llama-U) VLLM=("${UPSTREAM_PY:?upstream Python required}" -m vllm.entrypoints.cli.main) ;; esac
+if [ -n "${SUITE_PYTHON:-}" ]; then VLLM=("$SUITE_PYTHON" -m vllm.entrypoints.cli.main); fi
+CORES=${SUITE_CORES:-$CORES}
 # CPU mode runs on host CPUs; core ranges apply on Trainium and in CPU compile (compile-cache prefix).
 [ "${VLLM_NEURON_CPU_MODE:-0}" = 1 ] || export NEURON_VISIBLE_DEVICES=$CORES
 PROF=()

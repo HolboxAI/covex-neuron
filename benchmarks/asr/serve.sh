@@ -24,7 +24,9 @@ mkdir -p logs
 # from each other. SOLO=1 drops the pinning for the solo S2 re-run.
 CPUS="$((PAIR * 24))-$((PAIR * 24 + 23))"; PIN=(taskset -c "$CPUS"); [ "${SOLO:-0}" = 1 ] && PIN=()
 echo "cpus=${PIN[*]:-all}" >> "logs/$ARM${LOG_TAG:-}.meta"
-exec ${PIN[@]+"${PIN[@]}"} vllm serve "$MODEL_DIR" \
+VLLM=(vllm)
+if [ -n "${SUITE_PYTHON:-}" ]; then VLLM=("$SUITE_PYTHON" -m vllm.entrypoints.cli.main); fi
+exec ${PIN[@]+"${PIN[@]}"} "${VLLM[@]}" serve "$MODEL_DIR" \
   --served-model-name qwen3-asr-1.7b --dtype bfloat16 \
   --tensor-parallel-size "$ARM_TP" --max-model-len 1024 \
   --max-num-seqs 16 --max-num-batched-tokens 1024 \
