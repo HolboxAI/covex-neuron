@@ -15,5 +15,13 @@ done
 for v in $(git grep -hoE '[A-Z_]{8,} cannot be used' -- vllm_neuron | awk '{print $1}' | sort -u); do
   if grep -q "export $v=" benchmarks/asr/*.sh; then echo "FAIL scripts export $v, which vllm_neuron rejects"; fail=1; else echo "ok   not setting rejected $v"; fi
 done
-for s in benchmarks/asr/*.sh; do bash -n "$s" || { echo "FAIL syntax $s"; fail=1; }; done
+for s in benchmarks/*/*.sh; do bash -n "$s" || { echo "FAIL syntax $s"; fail=1; }; done
+# Undefined names / broken imports in every changed Python file (would have caught the nki NameError that killed run 5).
+changed=$(git diff --name-only origin/main...HEAD | grep '\.py$' || true)
+if [ -n "$changed" ]; then
+  if python3 -m pyflakes --version > /dev/null 2>&1; then
+    bad=$(python3 -m pyflakes $changed 2>&1 | grep -E "undefined name|syntax error|invalid syntax" || true)
+    [ -z "$bad" ] && echo "ok   pyflakes: no undefined names in $(echo $changed | wc -w | tr -d ' ') changed files" || { echo "FAIL pyflakes:"; echo "$bad"; fail=1; }
+  else echo "FAIL pyflakes not installed (pip install pyflakes)"; fail=1; fi
+fi
 exit $fail
