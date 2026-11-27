@@ -12,7 +12,7 @@ load() { # arm conc tag
     --phases transcribe --label "stage-$1-c$2" --output "stages/$1-c$2-$3.json" > /dev/null; }
 mkdir -p stages profiles
 # (a) request side + host flame graphs
-for a in S2 D; do "$HERE/serve.sh" "$a" "${PAIR[$a]}" "${PORT[$a]}" & done
+for a in S2 D; do LOG_TAG=-stage "$HERE/serve.sh" "$a" "${PAIR[$a]}" "${PORT[$a]}" & done
 for a in S2 D; do wait_up "${PORT[$a]}"; done
 for a in S2 D; do for c in 1 8; do
   load "$a" "$c" warm
@@ -27,7 +27,7 @@ for a in S2 D; do for c in 1 8; do
 done; done
 pkill -f "vllm serve" || true; sleep 15
 # (b) device timelines
-for a in S2 D; do PROFILE=1 "$HERE/serve.sh" "$a" "${PAIR[$a]}" "${PORT[$a]}" & done
+for a in S2 D; do LOG_TAG=-prof PROFILE=1 "$HERE/serve.sh" "$a" "${PAIR[$a]}" "${PORT[$a]}" & done
 for a in S2 D; do wait_up "${PORT[$a]}"; done
 for a in S2 D; do for c in 1 8; do
   load "$a" "$c" pwarm
