@@ -44,12 +44,15 @@ def prediction_from_extra_args(extra_args: dict | None, vocab_size: int) -> list
 class PredictionState:
     """Per-request alignment state between the generated output and the prediction."""
 
-    def __init__(self, prediction: Sequence[int], min_ngram: int = 3, max_ngram: int = 8, max_candidates: int = 16):
+    def __init__(self, prediction: Sequence[int], min_ngram: int = 3, max_ngram: int = 8, max_candidates: int = 16,
+                 aligned_start: bool = True):
         self.pred = list(prediction)
         self.min_ngram, self.max_ngram, self.max_candidates = min_ngram, max_ngram, max_candidates
         self.cursor = 0          # index in pred of the next expected token
         self.seen = 0            # output tokens already consumed
-        self.aligned = True
+        # True for a client prediction (the output starts where the file starts); False for prompt lookup (the prompt
+        # is a source of n-grams, not the beginning of the output)
+        self.aligned = aligned_start
         # index of every min_ngram window: tuple -> sorted END positions (index just after the window)
         self.index: dict[tuple, list[int]] = {}
         for end in range(min_ngram, len(self.pred) + 1):
@@ -106,9 +109,9 @@ class PredictionProposer:
         self.k, self.pad, self.min_ngram, self.max_ngram = num_speculative_tokens, pad_token_id, min_ngram, max_ngram
         self.states: dict[str, PredictionState] = {}
 
-    def add_request(self, req_id: str, prediction: Sequence[int] | None) -> None:
+    def add_request(self, req_id: str, prediction: Sequence[int] | None, aligned_start: bool = True) -> None:
         if prediction:
-            self.states[req_id] = PredictionState(prediction, self.min_ngram, self.max_ngram)
+            self.states[req_id] = PredictionState(prediction, self.min_ngram, self.max_ngram, aligned_start=aligned_start)
 
     def remove_request(self, req_id: str) -> None:
         self.states.pop(req_id, None)
@@ -126,3 +129,46 @@ class PredictionProposer:
         if len(req_ids) != len(outputs):
             raise ValueError("one output per request")
         return [self.propose_one(r, o)[0] for r, o in zip(req_ids, outputs)]
+
+
+class HostDraftProposer:
+    """Runner-facing drafter with no draft model (speculative method "ngram").
+
+    Plugs into vllm-neuron's existing multi-token verify path (S_decode = 1 + k, rejection sampler, KV rollback via
+    num_computed_tokens) the way EagleProposer does, but proposes on the host:
+      - the client's prediction (``vllm_xargs`` ``covex_prediction_ids``) when the request has one (K9);
+      - otherwise prompt lookup: n-grams of the request's own prompt (K6).
+    ``model`` is None: the runner skips draft-model loading, graph capture and warmup for it.
+    """
+
+    model = None
+
+    def __init__(self, num_speculative_tokens: int, vocab_size: int, pad_token_id: int = 0, prompt_lookup: bool = True,
+                 min_ngram: int = 3, max_ngram: int = 8):
+        self.num_speculative_tokens = num_speculative_tokens
+        self.vocab_size = vocab_size
+        self.prompt_lookup = prompt_lookup
+        self.proposer = PredictionProposer(num_speculative_tokens, pad_token_id, min_ngram, max_ngram)
+        self.known: set[str] = set()
+
+    def _admit(self, req_id: str, extra_args: dict | None, prompt_ids: Sequence[int] | None) -> None:
+        pred = prediction_from_extra_args(extra_args, self.vocab_size)
+        if pred:
+            self.proposer.add_request(req_id, pred, aligned_start=True)
+        elif self.prompt_lookup and prompt_ids:
+            self.proposer.add_request(req_id, prompt_ids, aligned_start=False)
+        self.known.add(req_id)
+
+    def propose_host(self, requests: Sequence[tuple[str, dict | None, Sequence[int] | None, Sequence[int]]],
+                     live: set[str] | None = None) -> list[list[int]]:
+        """requests: (req_id, sampling extra_args, prompt token ids, output token ids so far), in batch order.
+        live: ids of every request the runner still holds; state for any other id is dropped. -> k ids per request."""
+        if live is not None:
+            for r in list(self.known - live):
+                self.known.discard(r); self.proposer.remove_request(r)
+        out = []
+        for req_id, extra, prompt_ids, output in requests:
+            if req_id not in self.known:
+                self._admit(req_id, extra, prompt_ids)
+            out.append(self.proposer.propose_one(req_id, output)[0])
+        return out

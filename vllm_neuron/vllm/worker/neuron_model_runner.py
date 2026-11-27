@@ -96,6 +96,7 @@ from libtorch_neuronx_lite.compile.capture_backend import CaptureComplete
 from vllm_neuron.vllm.sample.rejection_sampler import RejectionSampler
 from vllm_neuron.vllm.spec_decode.dflash import DFlashProposer
 from vllm_neuron.vllm.spec_decode.eagle import EagleProposer
+from vllm_neuron.vllm.spec_decode.prediction_proposer import HostDraftProposer
 from vllm_neuron.vllm.platform import SO_DISABLED_MESSAGE
 from vllm_neuron.utils.bucket_utils import (
     SUPPORTED_KV_SEGMENT_SIZES,
@@ -1223,9 +1224,10 @@ class NeuronModelRunner(KVConnectorModelRunnerMixin, NeuronECConnectorModelRunne
             self._transition_bonus_tensor: torch.Tensor | None = None
 
         # Set up speculative decoding.
-        self.drafter: EagleProposer | DFlashProposer | None = None
+        self.drafter: EagleProposer | DFlashProposer | HostDraftProposer | None = None
         self.is_eagle3_spec = False
         self.is_dflash_spec = False
+        self.is_host_draft_spec = False   # K6/K9: drafts proposed on the host, no draft model
         self._draft_token_ids = None
         # Async speculative decoding drafts rows by req_id. Only used at
         # batch-composition changes (e.g. prefills merging into bs-wide decode).
@@ -1245,6 +1247,23 @@ class NeuronModelRunner(KVConnectorModelRunnerMixin, NeuronECConnectorModelRunne
                 self.is_dflash_spec = True
                 self.drafter = DFlashProposer(
                     self.vllm_config, self.device, self.on_device_sampling
+                )
+            elif self.speculative_config.method == "ngram":
+                # K9 predicted outputs (client prediction via vllm_xargs covex_prediction_ids) with K6 prompt lookup
+                # as the fallback. Reuses the target's multi-token verify (S_decode = 1 + k) and rejection sampler.
+                if self.use_async_scheduling:
+                    raise ValueError(
+                        "ngram/predicted-output speculation is host-proposed and needs synchronous scheduling; "
+                        "disable async scheduling"
+                    )
+                self.is_host_draft_spec = True
+                hf = self.vllm_config.model_config.hf_config
+                self.drafter = HostDraftProposer(
+                    self.speculative_config.num_speculative_tokens,
+                    vocab_size=self.vllm_config.model_config.get_vocab_size(),
+                    pad_token_id=getattr(hf, "pad_token_id", None) or 0,
+                    min_ngram=self.speculative_config.prompt_lookup_min or 3,
+                    max_ngram=self.speculative_config.prompt_lookup_max or 8,
                 )
             else:
                 raise ValueError(
@@ -1541,7 +1560,9 @@ class NeuronModelRunner(KVConnectorModelRunnerMixin, NeuronECConnectorModelRunne
 
     @property
     def is_spec_decode(self) -> bool:
-        return self.is_eagle3_spec or self.is_dflash_spec
+        # host drafts ride the EAGLE3 target path (aux hidden states are produced and ignored) so the verify graphs,
+        # rejection sampler and KV rollback are the production ones
+        return self.is_eagle3_spec or self.is_dflash_spec or self.is_host_draft_spec
 
     @property
     def cp_rank(self) -> int:
@@ -2236,7 +2257,7 @@ class NeuronModelRunner(KVConnectorModelRunnerMixin, NeuronECConnectorModelRunne
 
         logger.info("NeuronModel loading complete (moved to device and compiled)")
 
-        if self.drafter is not None:
+        if self.drafter is not None and not self.is_host_draft_spec:
             logger.info("Spec decode enabled. Loading draft model ...")
             # TODO: model loading logic could be extracted
             # Pass target model's padded hidden_size to draft model
@@ -2342,7 +2363,7 @@ class NeuronModelRunner(KVConnectorModelRunnerMixin, NeuronECConnectorModelRunne
                 )
 
         # Draft model capture
-        if self.drafter is not None:
+        if self.drafter is not None and not self.is_host_draft_spec:
             draft_modules = getattr(capture_config, "draft_modules", None)
             self._draft_tensor_capture = self._setup_capture(
                 self.drafter.model, draft_modules or [], subdirectory="draft"
@@ -6109,7 +6130,7 @@ class NeuronModelRunner(KVConnectorModelRunnerMixin, NeuronECConnectorModelRunne
                 )
 
         # === Draft model graph capture ===
-        if self.drafter is not None:
+        if self.drafter is not None and not self.is_host_draft_spec:
             logger.info(
                 "Capturing %s prefill graphs for bucket size: %d",
                 self.speculative_config.method.upper(),
@@ -6218,7 +6239,7 @@ class NeuronModelRunner(KVConnectorModelRunnerMixin, NeuronECConnectorModelRunne
         )
 
         # === Draft model warmup ===
-        if self.drafter is not None:
+        if self.drafter is not None and not self.is_host_draft_spec:
             logger.info(
                 "Warming up %s for bucket size: %d",
                 self.speculative_config.method.upper(),
@@ -10647,6 +10668,17 @@ class NeuronModelRunner(KVConnectorModelRunnerMixin, NeuronECConnectorModelRunne
         self._draft_token_ids = None
         return DraftTokenIds(req_ids, draft_token_ids)
 
+    def _propose_host_drafts(self) -> list[list[int]]:
+        """K6/K9: exactly k draft ids per request in batch order, from each request's prediction or prompt.
+        Runs after _update_states_after_model_execute, so output_token_ids holds this step's accepted tokens."""
+        assert isinstance(self.drafter, HostDraftProposer)
+        rows = []
+        for req_id in self.input_batch.req_ids:
+            st = self.requests[req_id]
+            extra = getattr(st.sampling_params, "extra_args", None) if st.sampling_params is not None else None
+            rows.append((req_id, extra, st.prompt_token_ids, st.output_token_ids))
+        return self.drafter.propose_host(rows, live=set(self.requests))
+
     def _propose_draft_token_ids(
         self,
         scheduler_output: Any,
@@ -10659,6 +10691,8 @@ class NeuronModelRunner(KVConnectorModelRunnerMixin, NeuronECConnectorModelRunne
         logits_indices: torch.Tensor | None = None,
         raw_sampled_token_ids: torch.Tensor | None = None,
     ) -> list[list[int]] | torch.Tensor:
+        if self.is_host_draft_spec:
+            return self._propose_host_drafts()
         assert isinstance(self.drafter, (EagleProposer, DFlashProposer))
 
         num_reqs = self.input_batch.num_reqs
