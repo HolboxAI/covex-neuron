@@ -1141,3 +1141,55 @@ def test_q32_request_p90_requires_complete_detailed_data_and_can_fail(tmp_path):
     assert "unknown (no per-request data)" in run([0.1] * 28)          # 28 records for 32 completed
     assert "| FAIL |" in run([0.1] * 28 + [3.0] * 4)                   # 4 of 32 at 3 s -> p90 = 3 s > 2 s
     assert "| PASS |" in run([0.1] * 31 + [3.0])                       # 1 of 32 slow -> p90 = 0.1 s
+
+
+def _pp():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("pp", ROOT / "vllm_neuron/vllm/spec_decode/prediction_proposer.py")
+    m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+    return m
+
+
+def test_prediction_proposer_drafts_aligns_and_pads():
+    pp = _pp(); P = pp.PredictionProposer(4, pad_token_id=0)
+    pred = [10, 11, 12, 13, 14, 15, 16, 17, 18, 19]
+    assert P.propose_one(pred, []) == ([10, 11, 12, 13], 4)                    # start of the file
+    assert P.propose_one(pred, [10, 11, 12]) == ([13, 14, 15, 16], 4)          # aligned prefix
+    assert P.propose_one(pred, pred[:8]) == ([18, 19, 0, 0], 2)               # tail shorter than k: padded
+    assert P.propose_one(pred, pred) == ([0, 0, 0, 0], 0)                     # prediction exhausted
+    # an edit inserted [99, 98] after 12; the output then rejoins the file at 13, 14, 15 -> re-align
+    assert P.propose_one(pred, [10, 11, 12, 99, 98, 13, 14, 15]) == ([16, 17, 18, 19], 4)
+    assert P.propose_one(pred, [1, 2, 3, 4, 5]) == ([0, 0, 0, 0], 0)          # no match: plain decoding
+    assert P.propose_one(None, [1]) == ([0, 0, 0, 0], 0)                       # absent prediction
+    assert all(len(d) == 4 for d in P.propose([pred, None, []], [[10], [], [5]]))   # exactly k per request
+
+
+def test_prediction_from_extra_args_rejects_bad_payloads():
+    pp = _pp()
+    assert pp.prediction_from_extra_args({"covex_prediction_ids": [1, 2, 3]}) == [1, 2, 3]
+    assert pp.prediction_from_extra_args(None) is None and pp.prediction_from_extra_args({}) is None
+    assert pp.prediction_from_extra_args({"covex_prediction_ids": [1, "a", 3]}) is None
+    assert pp.prediction_from_extra_args({"covex_prediction_ids": [1, -2]}) is None
+    assert pp.prediction_from_extra_args({"covex_prediction_ids": "123"}) is None
+
+
+def test_prediction_verification_is_exact_under_greedy_acceptance():
+    """Simulate greedy verify: accept drafts while they equal the target's tokens, then append the target's next
+    token. The output must equal plain greedy decoding for perfect, edited, wrong and absent predictions."""
+    pp = _pp(); P = pp.PredictionProposer(4, pad_token_id=0)
+    target = [10, 11, 12, 99, 98, 13, 14, 15, 16, 17, 18, 19, 2]              # what greedy decoding produces
+    for pred in ([10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 2], target, [5] * 20, None, []):
+        out, steps = [], 0
+        while len(out) < len(target):
+            draft, _ = P.propose_one(pred, out)
+            for d in draft:                                                  # verify: accept matching drafts
+                if len(out) < len(target) and d == target[len(out)]:
+                    out.append(d)
+                else:
+                    break
+            if len(out) < len(target):
+                out.append(target[len(out)])                                 # the target's own next token
+            steps += 1
+        assert out == target, (pred, out)
+        assert steps <= len(target)
+    # perfect prediction: 13 tokens in ceil(13 / 5) = 3 verify steps (4 drafts + 1 bonus each)
