@@ -175,3 +175,36 @@ def test_bench_snapshots_after_prewarm_and_per_level():
     text = (ROOT / "benchmarks/asr/bench.sh").read_text()
     assert text.index("prewarm") < text.index(".before.prom"), "warm the server before the first metrics snapshot"
     assert "metrics/$ARM.c$c.$ph.before.prom" in text, "snapshot each concurrency/phase separately"
+
+
+def test_liveness_uses_pid_not_pgrep_port():
+    """pgrep -f '--port N' misses a server until serve.sh execs vllm; the 2026-11-27 rehearsal killed starting servers."""
+    for script in [RUN, ROOT / "benchmarks/rehearsal/rehearse.sh"]:
+        code = "\n".join(l.split("#", 1)[0] for l in script.read_text().splitlines())
+        assert not re.search(r"pgrep -f -- \"--port", code), f"{script.name}: liveness via pgrep --port"
+        assert "kill -0" in code, f"{script.name}: no PID liveness check"
+
+
+def test_rehearsal_compile_pass_needs_positive_evidence():
+    sh = (ROOT / "benchmarks/rehearsal/rehearse.sh").read_text()
+    assert sh.index("Extracting graphs for") < sh.index('record $a compile PASS'), "compile PASS must require graph extraction in the log"
+
+
+def test_encoder_mlp_ports_are_kernel_eligible():
+    """NF.mlp silently falls back to PyTorch when a shape fails its gate; then a COVEX arm measures stock.
+    Re-derive the CTE gate (H % 128, ceil(I/tile) <= PSUM banks, bias disables I-sharding) for the ported encoders."""
+    src = (ROOT / "vllm_neuron/functional/mlp.py").read_text()
+    banks = int(re.search(r"^_NUM_HW_PSUM_BANKS = (\d+)", src, re.M).group(1))
+    tile = int(re.search(r"^_SRC_PROJ_INT_DIM_TILE_SIZE = (\d+)", src, re.M).group(1))
+    # (name, hidden H, intermediate I, tensor-parallel degree); both MLPs carry an up bias -> no I-sharding
+    for name, H, I, tp in [("Qwen3-VL-32B vision", 1152, 4304, 4), ("Qwen3-ASR-1.7B audio", 1024, 4096, 8)]:
+        i_rank = -(-I // tp)
+        assert H % 128 == 0, f"{name}: H={H} not 128-aligned -> torch fallback"
+        assert -(-i_rank // tile) <= banks, f"{name}: I/rank={i_rank} exceeds {banks}x{tile} -> torch fallback"
+
+
+def test_covex_flags_default_off():
+    src = (ROOT / "vllm_neuron/envs.py").read_text()
+    for flag in re.findall(r'"(COVEX_[A-Z0-9_]+)"\s*:', src):
+        body = src[src.index(f'"{flag}"'):][:300]
+        assert re.search(r'getenv\(\s*"%s"\s*(,\s*"0"\s*)?\)' % flag, body) or '"0"' in body or "False" in body, f"{flag} must default off"

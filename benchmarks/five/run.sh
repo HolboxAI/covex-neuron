@@ -19,13 +19,14 @@ start() {  # arm
 }
 # emb-C is KNOWN BROKEN (packed-prefill recompile); BROKEN_ARMS keeps it out until fixed. Checked by the tests.
 BROKEN_ARMS=" emb-C "
+declare -A SPID
 # Servers never exit on their own: never `wait` on them. Every wait below names client PIDs (bare wait hung run 2).
-for a in "${!PORT[@]}"; do [[ "$BROKEN_ARMS" == *" $a "* ]] && { echo "ARM $a SKIPPED (known broken)"; continue; }; start "$a" & done
+for a in "${!PORT[@]}"; do [[ "$BROKEN_ARMS" == *" $a "* ]] && { echo "ARM $a SKIPPED (known broken)"; continue; }; start "$a" & SPID[$a]=$!; done
 declare -A UP
 for a in "${!PORT[@]}"; do
   for _ in $(seq 1 360); do  # <= 60 min per arm (compile); stops early if the server died
     curl -sf "localhost:${PORT[$a]}/health" > /dev/null && { UP[$a]=1; break; }
-    pgrep -f -- "--port ${PORT[$a]}" > /dev/null || break
+    kill -0 "${SPID[$a]:-0}" 2> /dev/null || break   # serve PID; pgrep "--port" misses a server that has not exec'd yet
     sleep 10
   done
   echo "ARM $a $([ -n "${UP[$a]:-}" ] && echo UP || echo FAILED)"

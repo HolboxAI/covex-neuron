@@ -24,10 +24,12 @@ serve() {  # track arm port_offset modeldir cpus
 first_err() { grep -m1 -E "NCC_E[A-Z]+[0-9]+|Error:|Exception:|Traceback|FAILED|Killed|out of memory" "$1" 2>/dev/null \
               | sed -E 's/^\([^)]*\) //' | cut -c1-220 | tr '\t' ' '; }
 record() { printf '%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "$4" | tee -a REHEARSAL.tsv; }
-wait_up() {  # port seconds -> 0 up, 1 died, 2 timeout
-  for _ in $(seq 1 $(( $2 / 10 ))); do
-    curl -sf "localhost:$1/health" > /dev/null && return 0
-    pgrep -f -- "--port $1( |$)" > /dev/null || return 1
+declare -A SPID
+wait_up() {  # arm port seconds -> 0 up, 1 died, 2 timeout. Liveness = the serve PID (serve.sh execs vllm, same PID);
+  # never pgrep for "--port": that string only appears after exec, so an early check calls a starting server dead.
+  for _ in $(seq 1 $(( $3 / 10 ))); do
+    curl -sf "localhost:$2/health" > /dev/null && return 0
+    kill -0 "${SPID[$1]}" 2> /dev/null || return 1
     sleep 10
   done; return 2
 }
@@ -48,9 +50,10 @@ cpu_probe() {  # arm port
 track_a() {
   export VLLM_NEURON_CPU_MODE=1 REHEARSAL_EXTRA="--gpu-memory-utilization 0.2"
   for pair in "q32-T q32-C" "emb-T emb-C" "vl-T vl-C" "asr-T asr-C"; do
-    i=0; for a in $pair; do serve cpu $a 100 $HOME/models-small "$((i*8))-$((i*8+7))" & i=$((i+1)); done
+    i=0; for a in $pair; do serve cpu $a 100 $HOME/models-small "$((i*8))-$((i*8+7))" & SPID[$a]=$!; i=$((i+1)); done
     for a in $pair; do p=$(( $(port $a) + 100 )); L=$(log_of $a cpu)
-      wait_up $p 1200; rc=$?
+      wait_up $a $p 1200; rc=$?
+      if [ ! -s "$L" ]; then record $a cpu FAIL "empty server log (did not start)"; stop $p; continue; fi
       if [ $rc != 0 ]; then record $a cpu FAIL "$([ $rc = 2 ] && echo 'not up in 20 min' || echo 'server died'): $(first_err $L)"; stop $p; continue; fi
       if cpu_probe $a $p > logs/$a.cpu.probe.log 2>&1 && curl -sf "localhost:$p/health" > /dev/null; then record $a cpu PASS "served real requests"
       else record $a cpu FAIL "requests: $(first_err $L)$(tail -1 logs/$a.cpu.probe.log | cut -c1-120)"; fi
@@ -69,11 +72,14 @@ track_b() {
   # asr-T/asr-C/emb-T already compiled and served on Trainium (2026-11-27); spend the time on the arms that never did.
   for pair in "q32-C q32-T" "vl-C vl-T" "emb-C"; do
     for a in $pair; do need $a || { record $a compile FAIL "checkpoint not downloaded"; continue 2; }; done
-    i=0; for a in $pair; do serve compile $a 200 $HOME/models "$((16+i*24))-$((16+i*24+23))" & i=$((i+1)); done
+    i=0; for a in $pair; do serve compile $a 200 $HOME/models "$((16+i*24))-$((16+i*24+23))" & SPID[$a]=$!; i=$((i+1)); done
     for a in $pair; do p=$(( $(port $a) + 200 )); L=$(log_of $a compile)
-      wait_up $p 1800; rc=$?
+      wait_up $a $p 1800; rc=$?
       bad=$(grep -m1 -oE "NCC_E[A-Z]+[0-9]+[^.]*" "$L" | cut -c1-200)
-      if [ $rc = 0 ] && [ -z "$bad" ]; then record $a compile PASS "compiled, server up"
+      # PASS needs positive evidence of compilation in the log, never just the absence of errors.
+      ngraphs=$(grep -cE "Extracting graphs for" "$L" 2>/dev/null); ngraphs=${ngraphs:-0}
+      if [ ! -s "$L" ] || [ "$ngraphs" = 0 ]; then record $a compile FAIL "no compile output ($([ -s "$L" ] && echo 'log has no graph extraction' || echo 'empty log')): $(first_err $L)"
+      elif [ $rc = 0 ] && [ -z "$bad" ]; then record $a compile PASS "compiled, server up"
       elif [ $rc = 1 ] && [ -z "$bad" ] && ! grep -qE "Traceback|Error:" "$L"; then record $a compile PASS "compiled, exited clean"
       else record $a compile FAIL "${bad:-$( [ $rc = 2 ] && echo 'not done in 30 min: ' )$(first_err $L)}"; fi
       # decode graphs must keep the KV caches as in-place (mutated) inputs; [1] alone = the q32-C aliasing bug
