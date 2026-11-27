@@ -27,6 +27,7 @@ from nkilib.core.utils.common_types import NormType
 from vllm.distributed.parallel_state import get_tp_group
 from vllm.model_executor.models.interfaces import SupportsEagle3
 
+import vllm_neuron.envs as envs
 import vllm_neuron.functional as NF
 from vllm_neuron.functional.attention.attention_decode import (
     _swizzle_packed_k,
@@ -970,6 +971,28 @@ class LlamaAttention(nn.Module):
 
         active_blocks_table = block_table
 
+        # COVEX (COVEX_DECODE_DYNAMIC_FA=1): in-kernel prior mask from pos_ids and
+        # nkilib dynamic FA early exit at the batch's longest real context, instead
+        # of walking S_ctx = max_blocks_per_seq * block_size. Only on the plain BF16,
+        # non-DCP, non-attention-DP kernel path, and only when S_ctx > 8K and
+        # S_ctx % 8K == 0 (nkilib FA tile). Otherwise stock behaviour.
+        dyn_fa_pos_ids = None
+        dyn_fa_max_ctx = None
+        if (
+            envs.COVEX_DECODE_DYNAMIC_FA
+            and not dcp_decode_active
+            and self.attention_dp_size == 1
+            and not self.fp8_packed
+            and self.k_cache.dtype not in (torch.float8_e4m3fn, torch.float8_e5m2)
+            and positions is not None
+            and S_ctx > 8192
+            and S_ctx % 8192 == 0
+        ):
+            pos_bs = positions.view(B_local, S_decode).to(torch.int32)
+            dyn_fa_pos_ids = pos_bs.to(torch.float32)
+            dyn_fa_max_ctx = (pos_bs[:, 0].max() + S_decode).to(torch.int32).view(1)
+            attention_mask = None  # the wrapper builds the active-only overlay
+
         # Packed FP8 is selected by server config (neuron_config.fp8_packed_kv):
         # when enabled, the runner allocates the swizzled K layout and
         # bind_kv_cache sets self.fp8_packed, so the decode kernel always reads
@@ -1030,6 +1053,8 @@ class LlamaAttention(nn.Module):
             kv_needs_a2a=self.kv_needs_a2a,
             dcp_size=self.dcp_size if dcp_decode_active else 1,
             dcp_group=self.dcp_group if dcp_decode_active else None,
+            pos_ids=dyn_fa_pos_ids,
+            max_context_len=dyn_fa_max_ctx,
         )
 
         # >>> PARALLELISM: Sum O-proj partials across TP * attn_dp supergroup <<<
