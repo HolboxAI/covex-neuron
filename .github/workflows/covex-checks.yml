@@ -19,7 +19,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install pytest pyflakes
+      - run: pip install pytest pyflakes httpx
       - name: Make origin/main available for the changed-files check
         run: git fetch --no-tags origin main:refs/remotes/origin/main || true
       - run: python -m pytest tests/covex -q
