@@ -151,6 +151,17 @@ class HostDraftProposer:
         self.proposer = PredictionProposer(num_speculative_tokens, pad_token_id, min_ngram, max_ngram)
         self.known: set[str] = set()
 
+    # The decode warmup calls these inside the same block that compiles the target's (1 + k)-token verify graphs,
+    # so they cannot be skipped by the caller: there is no draft graph to capture or warm.
+    def graph_extract(self, *args, **kwargs) -> None:
+        return None
+
+    def warmup(self, *args, **kwargs) -> None:
+        return None
+
+    def load_model(self, *args, **kwargs) -> None:
+        return None
+
     def _admit(self, req_id: str, extra_args: dict | None, prompt_ids: Sequence[int] | None) -> None:
         pred = prediction_from_extra_args(extra_args, self.vocab_size)
         if pred:

@@ -68,3 +68,15 @@ def test_runner_skips_every_draft_model_step_for_host_drafts():
     assert 'self.speculative_config.method == "ngram"' in src and "needs synchronous scheduling" in src
     i = src.index("    def _propose_draft_token_ids(")
     assert "if self.is_host_draft_spec:\n            return self._propose_host_drafts()" in src[i:i + 900]
+
+
+
+def test_decode_warmup_draft_calls_are_noops_for_host_drafts():
+    """Astra: the two decode-warmup calls (graph_extract, warmup) sit inside the block that also compiles the
+    target's verify graphs, so the host drafter must accept them as no-ops (not AttributeError)."""
+    pp = _pp(); d = pp.HostDraftProposer(4, vocab_size=10)
+    assert d.graph_extract(num_tokens=40, num_reqs=8, attn_metadata={}) is None
+    assert d.warmup(num_tokens=40, num_reqs=8, attn_metadata={}) is None
+    src = (ROOT / "vllm_neuron/vllm/worker/neuron_model_runner.py").read_text()
+    for call in ("self.drafter.graph_extract(", "self.drafter.warmup("):
+        assert src.count(call) == 2, call                                    # prefill (guarded) + decode (no-op)
