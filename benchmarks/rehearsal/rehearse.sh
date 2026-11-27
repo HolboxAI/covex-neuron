@@ -84,9 +84,9 @@ track_b() {
   done
 }
 
-track_a > logs/track_a.log 2>&1 &
-track_b > logs/track_b.log 2>&1 &
-wait
+track_a > logs/track_a.log 2>&1 & TA=$!
+track_b > logs/track_b.log 2>&1 & TB=$!
+wait $TA $TB
 { echo "# CPU rehearsal $(date -u +%F' '%H:%MZ)"; echo; echo "covex-neuron $(git -C "$H/.." rev-parse --short HEAD)"; echo
   echo "| Arm | Track | Result | Detail |"; echo "|---|---|---|---|"
   sed -E 's/\|/\//g; s/\t/ | /g; s/^/| /; s/$/ |/' REHEARSAL.tsv

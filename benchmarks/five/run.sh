@@ -19,6 +19,7 @@ start() {  # arm
 }
 # emb-C is KNOWN BROKEN (packed-prefill recompile); BROKEN_ARMS keeps it out until fixed. Checked by the tests.
 BROKEN_ARMS=" emb-C "
+# Servers never exit on their own: never `wait` on them. Every wait below names client PIDs (bare wait hung run 2).
 for a in "${!PORT[@]}"; do [[ "$BROKEN_ARMS" == *" $a "* ]] && { echo "ARM $a SKIPPED (known broken)"; continue; }; start "$a" & done
 declare -A UP
 for a in "${!PORT[@]}"; do
@@ -38,7 +39,8 @@ llm() { # arm port tokenizer conc prompts tag
     --save-result --result-dir results --result-filename "$1-$6.json" > "logs/$1-$6.bench.log" 2>&1 || echo "BENCH $1-$6 FAILED"
 }
 # --- correctness: COVEX must reproduce stock's greedy output ------------------------------------------
-for m in q32; do up $m-T && up $m-C && { pin $m-T python3 $C gen 8000 results/$m-T.gen.json & pin $m-C python3 $C gen 8001 results/$m-C.gen.json & wait; python3 $C match results/$m-T.gen.json results/$m-C.gen.json | tee results/$m.match.json; }; done
+for m in q32; do up $m-T && up $m-C && { pin $m-T python3 $C gen 8000 results/$m-T.gen.json & g1=$!; pin $m-C python3 $C gen 8001 results/$m-C.gen.json & g2=$!
+  wait $g1 $g2; python3 $C match results/$m-T.gen.json results/$m-C.gen.json | tee results/$m.match.json; }; done
 
 # --- stage + kernel profiles FIRST (Qwen3-32B and ASR; T and C): the step-level data must not depend on time left -------------------------------------------
 for a in q32-T q32-C; do up $a || continue
@@ -54,21 +56,26 @@ done
 (
   for c in 1 8; do for a in q32-T q32-C; do up $a && llm $a ${PORT[$a]} $HOME/models/Qwen3-32B $c $((c==1?8:32)) c$c & done; wait; done
 ) &
+CL0=$!
 (
   up oss-T && for c in 1 4; do llm oss-T 8008 $HOME/models/gpt-oss-20b $c $((c==1?8:16)) c$c; done
 ) &
+CL1=$!
 (
   for t in t64 t256; do for a in emb-T emb-C; do up $a && pin $a python3 $C emb ${PORT[$a]} $D/embed/$t.jsonl 256 32 results/$a-$t.json & done; wait; done
   up emb-T && up emb-C && python3 $C match results/emb-T-t64.json results/emb-C-t64.json | tee results/emb.match.json
 ) &
+CL2=$!
 (
   for a in vl-T vl-C; do up $a && pin $a python3 $C vl ${PORT[$a]} $D/vl 40 4 results/$a.json & done; wait
   up vl-T && up vl-C && python3 $C match results/vl-T.json results/vl-C.json | tee results/vl.match.json
 ) &
+CL3=$!
 (
   for a in asr-T asr-C; do up $a && SOLO=1 ROUNDS=1 pin $a "$A/bench.sh" $a ${PORT[$a]} 100 1,8 & done; wait
 ) &
-wait
+CL4=$!
+wait $CL0 $CL1 $CL2 $CL3 $CL4
 
 pkill -f "vllm serve"; sleep 20
 for d in profiles/*/; do neuron-explorer view -d "$d" --output-format perfetto > /dev/null 2>&1 && python3 "$A/summarize_profile.py" "$d" > "$d/STAGES.md" 2>&1; done

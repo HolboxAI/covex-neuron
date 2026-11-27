@@ -150,3 +150,28 @@ def test_rehearsal_scripts_parse_and_cover_every_arm():
     for arm in ["q32-T", "q32-C", "emb-T", "emb-C", "vl-T", "vl-C", "asr-T", "asr-C"]:
         assert arm in sh, f"rehearsal does not cover {arm}"
     assert "VLLM_NEURON_CPU_MODE=1" in sh and "VLLM_NEURON_CPU_COMPILE=1" in sh
+
+
+def test_no_bare_wait_outside_subshells():
+    """A bare `wait` in the shell that started the servers waits for the servers forever (five-model run 2 hung there)."""
+    for script in [RUN, ROOT / "benchmarks/rehearsal/rehearse.sh", ROOT / "benchmarks/asr/run_all.sh"]:
+        if not script.exists():
+            continue
+        depth = 0
+        for i, line in enumerate(script.read_text().splitlines(), 1):
+            code = line.split("#", 1)[0].strip()
+            if code == "(":
+                depth += 1
+                continue
+            if code.startswith(")") and depth:
+                depth -= 1
+                continue
+            if depth == 0 and re.search(r"(^|[;&{]\s*)wait\s*(;|$|\})", code):
+                if "start" in script.read_text() or "serve" in script.read_text():
+                    pytest.fail(f"{script.name}:{i}: bare `wait` at top level; wait on client PIDs instead")
+
+
+def test_bench_snapshots_after_prewarm_and_per_level():
+    text = (ROOT / "benchmarks/asr/bench.sh").read_text()
+    assert text.index("prewarm") < text.index(".before.prom"), "warm the server before the first metrics snapshot"
+    assert "metrics/$ARM.c$c.$ph.before.prom" in text, "snapshot each concurrency/phase separately"

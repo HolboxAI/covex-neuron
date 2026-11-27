@@ -10,10 +10,30 @@ CLIENT_DIR=${CLIENT_DIR:-$HOME/qwen3-asr-inference-cuda-trainium}
 [ -d "$CLIENT_DIR/.git" ] && git -C "$CLIENT_DIR" checkout -q 4ce1ddb   # same client and dataset slice as the CUDA (1xL4, 8xL4) baselines
 mkdir -p results metrics
 curl -sf "http://127.0.0.1:$PORT/health" > /dev/null || { echo "arm $ARM (port $PORT) is not up; skipping" >&2; exit 0; }
-curl -sf "http://127.0.0.1:$PORT/metrics" > "metrics/$ARM.before.prom" || true
-"${PIN[@]}" python3 "$CLIENT_DIR/benchmark/benchmark.py" --base-url "http://127.0.0.1:$PORT" --model qwen3-asr-1.7b \
-  --data-dir "$CLIENT_DIR/data" --num-samples "$N" --concurrency "$CONC" --rounds "$ROUNDS" --warmup 3 \
-  --label "trn2-$ARM" --output "results/$ARM.json"
-# vLLM / vllm-neuron Prometheus counters after the run: queue, prefill, decode and TTFT histograms,
-# prompt-token histogram, and vllm_neuron:num_batched_tokens_padding / num_seqs_padding (padding waste per bucket).
-curl -sf "http://127.0.0.1:$PORT/metrics" > "metrics/$ARM.after.prom" || true
+run_client() {  # out concurrency phases warmup rounds samples
+  "${PIN[@]}" python3 "$CLIENT_DIR/benchmark/benchmark.py" --base-url "http://127.0.0.1:$PORT" --model qwen3-asr-1.7b \
+    --data-dir "$CLIENT_DIR/data" --num-samples "$6" --concurrency "$2" --phases "$3" --warmup "$4" --rounds "$5" \
+    --label "trn2-$ARM" --output "$1"
+}
+# 1) Warm every phase once BEFORE any counter snapshot: first requests pay one-time loading (51 s on one arm,
+#    2026-11-27), which otherwise lands in the server histograms and fakes a stage regression.
+run_client "results/$ARM.prewarm.json" 1 transcribe,chat_stream 3 1 4
+# 2) One snapshot pair per (concurrency, phase), so server-side stage times are per level, warmup-free.
+#    The client's own warmup is 0 here because the server is already warm; its stats exclude warmup either way.
+parts=()
+for c in ${CONC//,/ }; do for ph in transcribe chat_stream; do
+  curl -sf "http://127.0.0.1:$PORT/metrics" > "metrics/$ARM.c$c.$ph.before.prom" || true
+  run_client "results/$ARM.c$c.$ph.json" "$c" "$ph" 0 "$ROUNDS" "$N"
+  curl -sf "http://127.0.0.1:$PORT/metrics" > "metrics/$ARM.c$c.$ph.after.prom" || true
+  parts+=("results/$ARM.c$c.$ph.json")
+done; done
+# Merge into the single per-arm JSON that compare.py reads (same schema as one multi-level client call).
+python3 - "results/$ARM.json" "${parts[@]}" <<'PY'
+import json, sys
+out, parts = sys.argv[1], sys.argv[2:]
+base = json.load(open(parts[0])); base["phases"] = {}
+for f in parts:
+    for ph, levels in json.load(open(f))["phases"].items():
+        base["phases"].setdefault(ph, []).extend(levels)
+json.dump(base, open(out, "w"))
+PY
