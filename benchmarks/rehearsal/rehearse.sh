@@ -50,7 +50,9 @@ cpu_probe() {  # arm port
 track_a() {
   # CPU decode runs ~1 tok/s: probes check that real requests complete, not speed (4 prompts x 8 tokens, 4 images, 4 clips).
   export VLLM_NEURON_CPU_MODE=1 REHEARSAL_EXTRA="--gpu-memory-utilization 0.2" PROBE_N=4 PROBE_TOKENS=8
-  for pair in "q32-T q32-C" "emb-T emb-C" "vl-T vl-C" "asr-T asr-C"; do
+  # REHEARSAL_PAIRS_A / _B (";"-separated) narrow the arms, e.g. for the CI harness test.
+  IFS=";" read -r -a PAIRS <<< "${REHEARSAL_PAIRS_A:-q32-T q32-C;emb-T emb-C;vl-T vl-C;asr-T asr-C}"
+  for pair in "${PAIRS[@]}"; do
     i=0; for a in $pair; do serve cpu $a 100 $HOME/models-small "$((i*8))-$((i*8+7))" & SPID[$a]=$!; i=$((i+1)); done
     for a in $pair; do p=$(( $(port $a) + 100 )); L=$(log_of $a cpu)
       wait_up $a $p 1200; rc=$?
@@ -71,7 +73,8 @@ track_b() {
          NEURON_LIBTORCH_REMOTE_CACHE=$HOME/neff_cache NEURON_LIBTORCH_PARALLEL_COMPILE_WORKERS=8
   mkdir -p $HOME/neff_cache
   # asr-T/asr-C/emb-T already compiled and served on Trainium (2026-11-27); spend the time on the arms that never did.
-  for pair in "q32-C q32-T" "vl-C vl-T" "emb-C"; do
+  IFS=";" read -r -a PAIRS <<< "${REHEARSAL_PAIRS_B:-q32-C q32-T;vl-C vl-T;emb-C}"
+  for pair in "${PAIRS[@]}"; do
     for a in $pair; do need $a || { record $a compile FAIL "checkpoint not downloaded"; continue 2; }; done
     i=0; for a in $pair; do serve compile $a 200 $HOME/models "$((16+i*24))-$((16+i*24+23))" & SPID[$a]=$!; i=$((i+1)); done
     for a in $pair; do p=$(( $(port $a) + 200 )); L=$(log_of $a compile)

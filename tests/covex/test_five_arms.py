@@ -208,3 +208,29 @@ def test_covex_flags_default_off():
     for flag in re.findall(r'"(COVEX_[A-Z0-9_]+)"\s*:', src):
         body = src[src.index(f'"{flag}"'):][:300]
         assert re.search(r'getenv\(\s*"%s"\s*(,\s*"0"\s*)?\)' % flag, body) or '"0"' in body or "False" in body, f"{flag} must default off"
+
+
+def test_rehearsal_harness_end_to_end_with_fake_vllm(tmp_path):
+    """Runs the real rehearse.sh (q32 arms, both tracks) against a fake vllm that starts 3 s late.
+    Catches harness bugs (start-up race, empty-log PASS, wrong waits) before they cost an instance."""
+    import sys as _sys
+    if _sys.platform != "linux" or not shutil.which("taskset"):
+        pytest.skip("needs Linux bash>=4 and taskset (runs in CI)")
+    home = tmp_path / "home"
+    for d in ["models/Qwen3-32B", "models-small/Qwen3-32B"]:
+        (home / d).mkdir(parents=True)
+    (home / "models/Qwen3-32B/.done").touch()
+    run = tmp_path / "run"; run.mkdir()
+    env = {"HOME": str(home), "PATH": f"{ROOT/'tests/covex/fake_bin'}:{os.environ['PATH']}",
+           "REHEARSAL_PAIRS_A": "q32-T q32-C", "REHEARSAL_PAIRS_B": "q32-C q32-T"}
+    r = subprocess.run(["bash", str(ROOT / "benchmarks/rehearsal/rehearse.sh")], cwd=run, env=env,
+                       capture_output=True, text=True, timeout=600)
+    tsv = (run / "REHEARSAL.tsv").read_text()
+    rows = {(l.split("\t")[0], l.split("\t")[1]): l.split("\t")[2] for l in tsv.splitlines() if l}
+    expect = {("q32-T", "cpu"), ("q32-C", "cpu"), ("q32-C", "compile"), ("q32-T", "compile"),
+              ("q32-C", "compile-alias"), ("q32-T", "compile-alias")}
+    assert expect <= rows.keys(), f"missing rows: {expect - rows.keys()}\n{tsv}\n{r.stdout[-2000:]}\n{r.stderr[-2000:]}"
+    bad = {k: v for k, v in rows.items() if v != "PASS"}
+    assert not bad, f"harness reported failures against a healthy fake server: {bad}\n{tsv}"
+    assert (run / "REHEARSAL.md").exists()
+    assert subprocess.run(["pgrep", "-f", "fake_server.py"], capture_output=True).returncode != 0, "servers left running"
