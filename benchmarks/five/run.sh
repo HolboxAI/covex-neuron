@@ -34,6 +34,16 @@ up() { [ -n "${UP[$1]:-}" ]; }
 # --- correctness: COVEX must reproduce stock's greedy output ------------------------------------------
 for m in q32; do up $m-T && up $m-C && { pin $m-T python3 $C gen 8000 results/$m-T.gen.json & pin $m-C python3 $C gen 8001 results/$m-C.gen.json & wait; python3 $C match results/$m-T.gen.json results/$m-C.gen.json | tee results/$m.match.json; }; done
 
+# --- stage + kernel profiles FIRST (Qwen3-32B and ASR; T and C): the step-level data must not depend on time left -------------------------------------------
+for a in q32-T q32-C; do up $a || continue
+  curl -sf -X POST "localhost:${PORT[$a]}/start_profile" > /dev/null && llm $a ${PORT[$a]} $HOME/models/Qwen3-32B 8 8 prof \
+    && curl -sf -X POST "localhost:${PORT[$a]}/stop_profile" > /dev/null
+done
+for a in asr-T asr-C; do up $a || continue
+  pa=$([ $a = asr-T ] && echo S2 || echo DL)
+  curl -sf -X POST "localhost:${PORT[$a]}/start_profile" > /dev/null && SOLO=1 ROUNDS=1 pin $a "$A/bench.sh" $a-prof ${PORT[$a]} 32 8 \
+    && curl -sf -X POST "localhost:${PORT[$a]}/stop_profile" > /dev/null
+done
 # --- throughput, T and C of a model at the same time ----------------------------------------------------
 llm() { # arm port tokenizer conc prompts tag
   pin $1 vllm bench serve --backend vllm --base-url "http://127.0.0.1:$2" --model m --tokenizer "$3" \
@@ -60,16 +70,6 @@ llm() { # arm port tokenizer conc prompts tag
 ) &
 wait
 
-# --- stage + kernel profiles (Qwen3-32B and ASR; T and C) -------------------------------------------
-for a in q32-T q32-C; do up $a || continue
-  curl -sf -X POST "localhost:${PORT[$a]}/start_profile" > /dev/null && llm $a ${PORT[$a]} $HOME/models/Qwen3-32B 8 8 prof \
-    && curl -sf -X POST "localhost:${PORT[$a]}/stop_profile" > /dev/null
-done
-for a in asr-T asr-C; do up $a || continue
-  pa=$([ $a = asr-T ] && echo S2 || echo DL)
-  curl -sf -X POST "localhost:${PORT[$a]}/start_profile" > /dev/null && SOLO=1 ROUNDS=1 pin $a "$A/bench.sh" $a-prof ${PORT[$a]} 32 8 \
-    && curl -sf -X POST "localhost:${PORT[$a]}/stop_profile" > /dev/null
-done
 pkill -f "vllm serve"; sleep 20
 for d in profiles/*/; do neuron-explorer view -d "$d" --output-format perfetto > /dev/null 2>&1 && python3 "$A/summarize_profile.py" "$d" > "$d/STAGES.md" 2>&1; done
 python3 "$H/summarize.py" results > RESULTS.md; cat RESULTS.md
