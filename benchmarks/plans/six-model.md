@@ -7,7 +7,7 @@
 
 | Name | What it is |
 |---|---|
-| **R** (recipe stock) | Upstream code with the upstream tutorial/recipe config |
+| **R** (recipe stock) | Upstream code with the upstream tutorial/recipe config. Run only where it differs from T and fits: Llama. ASR R is Dax's earlier stock run (history only) |
 | **T** (tuned stock) | Upstream code with the same config knobs COVEX uses (cap, buckets, block size, max_model_len), no code changes. **The headline baseline.** |
 | **C** (COVEX) | Same config as T, plus COVEX code flags |
 
@@ -53,7 +53,7 @@ Each instance is a trn2.48xlarge with 16 chips.
 
 | Instance | Arms (T + C per model; R where it differs from T) | Chips |
 |---|---|---|
-| A | Qwen3-32B T/C (4), ASR R/T/C (6) + C-T4 (1) + C-LNC1 (1), Llama R/T/C + T-no77 (4, R on TP8 = 2) | 16 |
+| A | Qwen3-32B T/C (4); ASR T/C (4) + C-T4 (1) + C-LNC1 (1); Llama R on TP8 (2) + T, C, T-no77 on TP4 (3) | 15 |
 | B | Embedding T/C (4), VL T/C (2), GPT-OSS T/C (4) | 10 |
 
 - Separate compile caches for the nki-library arms.
