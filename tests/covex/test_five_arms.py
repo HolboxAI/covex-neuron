@@ -937,8 +937,8 @@ def test_provenance_malformed_record_prefix_and_missing_tp_rank(tmp_path):
     assert r.returncode == 1 and "no provenance record for ['TP5']" in r.stdout, r.stdout
 
 
-@pytest.mark.parametrize("fault,expect", [("FAKE_PROFILE_EMPTY_PORTS", "0 non-empty trace files < 8"),
-                                          ("FAKE_PROFILE_DROP_RANK_PORTS", "7 non-empty trace files < 8"),
+@pytest.mark.parametrize("fault,expect", [("FAKE_PROFILE_EMPTY_PORTS", "0 non-empty .ntff traces < 8"),
+                                          ("FAKE_PROFILE_DROP_RANK_PORTS", "traces from 7 distinct ranks < 8"),
                                           ("FAKE_NO_NEFF_PORTS", "FAILED neff: no non-empty files")])
 @pytest.mark.skipif(not LINUX, reason="Linux CI")
 def test_q32_run_rejects_missing_profile_artifacts(tmp_path, fault, expect):
@@ -1377,7 +1377,7 @@ exec vllm "$@"
     run = tmp_path / "run"; run.mkdir()
     env = dict(os.environ, HOME=str(home), PATH=f"{ROOT/'tests/covex/fake_bin'}:{os.environ['PATH']}",
                PYTHONPATH=f"{stub['fork']}:{tk.parent}", UPSTREAM_PY=str(upy), UPSTREAM_DIR=str(stub["upstream"]),
-               FORK_DIR=str(stub["fork"]), Q32_MIN_PROCS="1", Q32_WINDOWS="1", Q32_READY_SECS="120", **extra_env)
+               FORK_DIR=str(stub["fork"]), Q32_MIN_PROCS="1", Q32_WINDOWS="1", **{"Q32_READY_SECS": "120", **extra_env})
     r = subprocess.run(["bash", str(ROOT / "benchmarks/q32/run2.sh")], cwd=run, env=env, capture_output=True, text=True, timeout=1200)
     return r, run
 
@@ -1424,7 +1424,8 @@ def test_run2_failed_u_profile_skips_other_profiles_and_continues(tmp_path):
 
 @run2_e2e
 def test_run2_arm_dying_mid_run_is_incomplete_but_summarized(tmp_path):
-    r, run = _q32_run2(tmp_path, {"FAKE_DIE_AFTER": "8102:60"})
+    r, run = _q32_run2(tmp_path, {"FAKE_DIE_AFTER": "8102:20"})          # F dies during its correctness checks
+    # (the fake bench writes results without contacting the server, so death must come from a server request)
     assert r.returncode == 1 and "RUN INCOMPLETE" in r.stdout, r.stdout[-3000:]
     assert (run / "RESULTS.md").exists() and (run / "results/q32-U-c1-w1.json").exists()
 

@@ -179,8 +179,10 @@ for arm in ARMS:
             ratio = f"{x / r:.2f}x" if not why and x and r else "–"
             label = "complete" + (" (exploratory arm)" if arm in EXPLORATORY else "")
             print(f"| {arm} | {ref} | {c} | {x or '–'} | {r or '–'} | {ratio} | {'; '.join(why) or label} |")
-            if why and (arm, ref) in REQUIRED:
-                incomplete.append(f"{arm} vs {ref} {c}: " + "; ".join(why))
+            # run 2: a token or needle difference is a finding (ratio suppressed, reported); only missing work, a
+            # failed step or an invalid U baseline make the run incomplete
+            if (hard if RUN2 else why) and (arm, ref) in REQUIRED:
+                incomplete.append(f"{arm} vs {ref} {c}: " + "; ".join(hard if RUN2 else why))
 # a requested exploratory arm must have complete, valid windows; only its token agreement is optional
 for arm in [x for x in ARMS if x in EXPLORATORY]:
     for c, n in LOADS:
