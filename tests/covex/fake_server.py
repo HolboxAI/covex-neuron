@@ -188,7 +188,8 @@ class H(http.server.BaseHTTPRequestHandler):
                 h = hashlib.sha256(str(t).encode()).digest()
                 return [round((b - 127.5) / 127.5, 6) for b in h[:8]]
             if os.environ.get("COVEX_PACK_TRACE") == "1":   # what the real runner logs per packed prefill step
-                n = len(items); m = [{"req": f"r{i}", "start": 128 * i, "tokens": 64, "padded": 128} for i in range(n)]
+                n = len(items); rid = os.urandom(4).hex()   # unique per request, like vLLM's request ids
+                m = [{"req": f"embd-{rid}-{i}", "start": 128 * i, "tokens": 64, "padded": 128} for i in range(n)]
                 print(f"(Worker_TP0 pid={os.getpid()}) INFO neuron_model_runner.py:4240 COVEX_PACK_TRACE prefill step: "
                       f"members={m!r} total_padded={128 * n} padded_num_reqs=8 packed=True", file=sys.stderr, flush=True)
             return self._send(200, {"data": [{"index": i, "embedding": vec(t)} for i, t in enumerate(items)]})

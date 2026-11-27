@@ -59,3 +59,10 @@ def test_incomplete_client_report_is_not_verified(tmp_path):
     rep = tmp_path / "iso.json"; rep.write_text(json.dumps({"pass": False, "reason": "HTTP 500"}))
     r = subprocess.run([sys.executable, str(ROOT / "benchmarks/emb/pack_trace_check.py"), str(log), "0", str(rep)], capture_output=True, text=True)
     assert r.returncode == 1 and json.load(open(rep))["packed_step_verified"] is False
+
+
+
+def test_interleaved_rank_lines_are_counted_once(tmp_path):
+    g0, g1 = _good(0), _good(1)
+    rc, d = _run(tmp_path, g0 + g1)                       # all of rank 0, then all of rank 1 (not adjacent)
+    assert rc == 0 and d["trace"]["pair_steps"] == 8 and d["trace"]["single_steps"] == 2, d

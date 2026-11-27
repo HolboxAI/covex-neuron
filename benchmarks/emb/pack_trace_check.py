@@ -27,13 +27,13 @@ def steps(lines):
 
 def check(log_lines, rep):
     st = steps(log_lines)
-    # one line per TP rank: keep rank-0 view by de-duplicating identical consecutive records
-    uniq = []
+    # every TP rank logs the same step: one step per distinct set of request ids (ids are unique per request)
+    seen, uniq = set(), []
     for s in st:
-        key = json.dumps([[m["start"], m["tokens"], m["padded"]] for m in s["members"]]) + str(s["total_padded"])
-        if not uniq or uniq[-1][0] != key or len({m["req"] for m in s["members"]} ^ uniq[-1][1]):
-            uniq.append((key, {m["req"] for m in s["members"]}, s))
-    st = [u[2] for u in uniq]
+        key = tuple(sorted(m["req"] for m in s["members"]))
+        if key not in seen:
+            seen.add(key); uniq.append(s)
+    st = uniq
     repeat = len(next(iter(rep["cases"].values()))["b_sha256"])
     pairs = [s for s in st if len(s["members"]) == 2]
     singles = [s for s in st if len(s["members"]) == 1]
