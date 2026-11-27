@@ -39,7 +39,12 @@ wait_up() {  # arm port seconds -> 0 up, 1 died, 2 timeout. Liveness = the serve
 need() {  # wait <= 25 min for the real checkpoint download marker
   local m; case $1 in q32-*) m=Qwen3-32B;; vl-*) m=Qwen3-VL-32B-Instruct;; emb-*) m=Qwen3-Embedding-8B;; asr-*) m=Qwen3-ASR-1.7B;; esac
   for _ in $(seq 1 150); do [ -f "$HOME/models/$m/.done" ] && return 0; sleep 10; done; return 1; }
-stop() { pkill -f -- "--port $1( |$)"; sleep 5; pkill -9 -f -- "--port $1( |$)"; true; }
+killtree() { local c; for c in $(pgrep -P "$1" 2>/dev/null); do killtree "$c" "$2"; done; kill "-$2" "$1" 2>/dev/null; true; }
+stop() {  # port arm: kill the arm's process tree by PID, then anything still bound to the port
+  [ -n "${2:-}" ] && [ -n "${SPID[$2]:-}" ] && killtree "${SPID[$2]}" TERM
+  pkill -f -- "--port $1( |$)"; sleep 5
+  [ -n "${2:-}" ] && [ -n "${SPID[$2]:-}" ] && killtree "${SPID[$2]}" KILL
+  pkill -9 -f -- "--port $1( |$)"; true; }
 
 # ---------------- Track A: CPU mode, small same-architecture checkpoints ----------------
 cpu_probe() {  # arm port
@@ -59,10 +64,10 @@ track_a() {
     i=0; for a in $pair; do serve cpu $a 100 $HOME/models-small "$(cpuset $((i*8)) $((i*8+7)))" & SPID[$a]=$!; i=$((i+1)); done
     for a in $pair; do p=$(( $(port $a) + 100 )); L=$(log_of $a cpu)
       wait_up $a $p 1200; rc=$?
-      if [ $rc != 0 ]; then record $a cpu FAIL "$([ $rc = 2 ] && echo 'not up in 20 min' || { [ -s "$L" ] && echo 'server died' || echo 'did not start (empty log)'; }): $(first_err $L)"; stop $p; continue; fi
+      if [ $rc != 0 ]; then record $a cpu FAIL "$([ $rc = 2 ] && echo 'not up in 20 min' || { [ -s "$L" ] && echo 'server died' || echo 'did not start (empty log)'; }): $(first_err $L)"; stop $p $a; continue; fi
       if cpu_probe $a $p > logs/$a.cpu.probe.log 2>&1 && curl -sf "localhost:$p/health" > /dev/null; then record $a cpu PASS "served real requests"
       else record $a cpu FAIL "requests: $(first_err $L)$(tail -1 logs/$a.cpu.probe.log | cut -c1-120)"; fi
-      stop $p
+      stop $p $a
     done
     case "$pair" in q32*) [ -s results/q32-T.cpu.gen.json ] && [ -s results/q32-C.cpu.gen.json ] && python3 $C match results/q32-T.cpu.gen.json results/q32-C.cpu.gen.json > results/q32.cpu.match.json 2>&1 ;; esac
   done
@@ -91,7 +96,7 @@ track_b() {
       # decode graphs must keep the KV caches as in-place (mutated) inputs; [1] alone = the q32-C aliasing bug
       if [[ $a == q32-* ]]; then n=$(grep -E "Mutated inputs: \[1\], " "$L" | wc -l); m=$(grep -cE "Mutated inputs: \[1, " "$L")
         record $a compile-alias "$([ "$n" = 0 ] && [ "$m" -gt 0 ] && echo PASS || echo FAIL)" "lanes with KV-cache aliasing=$m, without=$n"; fi
-      stop $p
+      stop $p $a
     done
   done
 }

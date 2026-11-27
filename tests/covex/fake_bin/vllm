@@ -8,4 +8,4 @@ if [ "${VLLM_NEURON_CPU_COMPILE:-0}" = 1 ]; then
   echo "INFO - neuron_worker.py:2199 - Extracting graphs for 2 prefill buckets: [(1024, 8192), (8192, 8192)]"
   for l in 2 3 4 5; do echo "INFO - aliasing_analysis.py:745 - [trace lane=$l rank=0] Mutated inputs: [1, 13, 14, 25, 26], Explicit outputs: 1"; done
 fi
-exec python3 "$(dirname "$0")/../fake_server.py" "$port"
+exec python3 "$(dirname "$0")/../fake_server.py" --port "$port"   # real vllm carries --port too

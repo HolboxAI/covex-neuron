@@ -19,4 +19,4 @@ class H(http.server.BaseHTTPRequestHandler):
         self._send({"choices": [{"text": "ok " + str(body.get("prompt", ""))[:8]}], "usage": {"completion_tokens": 2}})
 
 
-http.server.ThreadingHTTPServer(("127.0.0.1", int(sys.argv[1])), H).serve_forever()
+http.server.ThreadingHTTPServer(("127.0.0.1", int(sys.argv[sys.argv.index("--port") + 1])), H).serve_forever()
