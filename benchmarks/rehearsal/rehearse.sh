@@ -12,6 +12,9 @@ export CLIENT_DIR=$HOME/qwen3-asr-inference-cuda-trainium
 # fresh results every attempt: a stale probe output must never reach a verdict
 [ -d results ] && [ -n "$(ls -A results 2>/dev/null)" ] && mv results "results.prev.$(date +%s)"
 mkdir -p results logs; : > REHEARSAL.tsv
+# A recompile word, not a substring: "Precompile: OFF" (an info line in every successful stock log) must not match.
+RECOMPILE_RE='fail_on_recompile|(^|[^[:alnum:]_])recompil'
+
 port() { case $1 in q32-T) echo 8000;; q32-C) echo 8001;; q32-U) echo 8008;; q32-K) echo 8009;; q32-F) echo 8010;; q32-Ut) echo 8011;; asr-T) echo 8002;; asr-C) echo 8003;;
                     emb-T) echo 8004;; emb-C) echo 8005;; vl-T) echo 8006;; vl-C) echo 8007;; esac; }
 log_of() { case $1 in asr-T) echo "logs/S2-$2-T.server.log";; asr-C) echo "logs/DL-$2-C.server.log";; *) echo "logs/$1-$2.server.log";; esac; }
@@ -132,7 +135,7 @@ track_b() {
       elif [ "$rc" = 1 ] && [ "$exit_rc" != 0 ]; then record $a compile FAIL "launcher exited $exit_rc: ${bad:-$(first_err "$L")}"
       elif [ "$rc" = 2 ]; then record $a compile FAIL "not done in 30 min: ${bad:-$(first_err "$L")}"
       elif ! grep -qF "Model warmup completed:" "$L"; then record $a compile FAIL "no post-compilation completion marker: ${bad:-$(first_err "$L")}"
-      elif grep -qiE "fail_on_recompile|recompil" "$L"; then record $a compile FAIL "recompile: $(grep -m1 -iE 'fail_on_recompile|recompil' "$L" | cut -c1-200)"
+      elif grep -qiE "$RECOMPILE_RE" "$L"; then record $a compile FAIL "recompile: $(grep -m1 -iE "$RECOMPILE_RE" "$L" | cut -c1-200)"
       elif [ $rc = 0 ] && [ -z "$bad" ]; then record $a compile PASS "compiled, server up"
       elif [ $rc = 1 ] && [ -z "$bad" ] && ! grep -qE "Traceback|Error:" "$L"; then record $a compile PASS "compiled, exited clean"
       else record $a compile FAIL "${bad:-$(first_err "$L")}"; fi
@@ -151,9 +154,12 @@ track_b() {
     for a in $pair; do [[ $a == q32-* && $a != q32-T ]] || continue
       if [ $a = q32-Ut ]; then   # extra (batch x context-bucket) decode graphs: lanes differ from stock's 6, so no
         # lane-matched parity; require every lane present on all 8 ranks with full KV aliasing (count + SPMD checks)
+        # Expected targets from the pinned compile plan, not from what was observed: 2 prefill buckets + 4 decode batch
+        # sizes x 3 contexts (2,048, 8,192 and the 32,768 fallback) = 14 lanes, each on all 8 ranks.
         La=$(log_of $a compile); nl=$(grep -oE "\[trace lane=[0-9]+ " "$La" 2>/dev/null | sort -u | wc -l | tr -d ' ')
-        res=$(python3 "$H/rehearsal/alias_check.py" "$La" "$cfgj" "${nl:-0}" 8 2>&1)
-        case "${res%%	*}" in UNVERIFIED) [ "${nl:-0}" -ge 6 ] && st=PASS || st=FAIL; res="x	$nl lanes (>= 6 needed), all ranks, full aliasing; no lane-matched stock reference: ${res#*	}";;
+        want=${Q32_UT_LANES:-14}
+        res=$(python3 "$H/rehearsal/alias_check.py" "$La" "$cfgj" "$want" 8 2>&1)
+        case "${res%%	*}" in UNVERIFIED) [ "${nl:-0}" = "$want" ] && st=PASS || st=FAIL; res="x	$nl lanes (exactly $want expected), all ranks, full aliasing; no lane-matched stock reference: ${res#*	}";;
           FAIL) st=FAIL;; *) st=FAIL; res="x	alias_check error: $res";; esac
         record $a compile-alias $st "${res#*	}"; record $a kv-identity UNVERIFIED "count + SPMD only (extra decode-bucket graphs)"; continue
       fi

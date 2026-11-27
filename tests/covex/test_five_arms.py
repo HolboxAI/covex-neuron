@@ -673,7 +673,13 @@ def test_q32_summary_gates_on_windows_and_cache(tmp_path):
     r = subprocess.run(["python3", str(ROOT / "benchmarks/q32/summarize.py"), str(tmp_path), "--arms", "q32-U q32-T q32-K",
                         "--windows", "2", "--status", str(st)], capture_output=True, text=True)
     row = next(l for l in r.stdout.splitlines() if l.startswith("| q32-K | q32-U | c1 |"))
-    assert "| – |" in row and "q32-U step failed: profile FAILED start" in row, row
+    # agreed rule (Astra, run 2): a failed profile leaves stage times unknown; it never suppresses a valid ratio
+    assert "x |" in row and "profile" not in row, row
+    st.write_text("q32-U\tprovenance\tFAIL wrong tree\n")                 # a hard step still suppresses it
+    r = subprocess.run(["python3", str(ROOT / "benchmarks/q32/summarize.py"), str(tmp_path), "--arms", "q32-U q32-T q32-K q32-F",
+                        "--windows", "2", "--status", str(st)], capture_output=True, text=True)
+    row = next(l for l in r.stdout.splitlines() if l.startswith("| q32-K | q32-U | c1 |"))
+    assert "| – |" in row and "q32-U step failed: provenance FAIL" in row, row
     # zero windows and missing throughput are rejected, never a pass or a crash
     z = subprocess.run(["python3", str(ROOT / "benchmarks/q32/summarize.py"), str(tmp_path), "--arms", "q32-U q32-T q32-K",
                         "--windows", "0"], capture_output=True, text=True)
@@ -1287,7 +1293,8 @@ def _run2_fixture(tmp_path, ut_tpot_itl=0.02, f_replay_pass=True, ut_needle_fail
                 {"pass": ok, "n": 8, "mismatches": [] if ok else [{"i": 3, "first_diff": 5, "near_tie": True}]}))
         bad = ut_needle_fail and arm == "q32-Ut"
         (tmp_path / f"{arm}.needle.json").write_text(json.dumps({"pass": not bad, "results": [
-            {"len": L, "pass": not (bad and L == 24044)} for L in (8204, 9644, 24044)]}))
+            {"len": L, "pass": not (bad and L == 24044), "got": "1234" if not (bad and L == 24044) else "999"}
+            for L in (8204, 9644, 24044)]}))
     (tmp_path / "q32-U.rerun.vs.q32-U.replay.match.json").write_text(json.dumps({"pass": u_rerun_pass, "n": 8}))
     (tmp_path / "runner.tsv").write_text("q32-U\tMRv2\tnone\tKV cache budget: 24 - 7.64 - 7.00 = 9.36 GiB\n")
     r = subprocess.run(["python3", str(ROOT / "benchmarks/q32/summarize.py"), str(tmp_path), "--arms", "q32-U q32-Ut q32-F",
@@ -1315,13 +1322,33 @@ def test_q32_run2_relative_limit_fails_slower_arm(tmp_path):
 
 
 def test_q32_run2_replay_and_needles_gate_eligibility(tmp_path):
-    out = _run2_fixture(tmp_path, f_replay_pass=False, ut_needle_fail=True, u_rerun_pass=False).stdout
+    out = _run2_fixture(tmp_path, f_replay_pass=False, ut_needle_fail=True).stdout
     best = out.split("## Best eligible tested point per arm and workload", 1)[1]
     assert "| q32-F | – | – | not eligible: replay differs on 1 prompt(s) (1 near-tie)" in best, best
     assert "| q32-Ut | – | – | not eligible: needles failed at 24044" in best, best
-    assert "NOT identical: replay diffs are not attributable" in out
     cmp = out.split("## Comparisons", 1)[1].split("##", 1)[0]
     assert "(exploratory)" in cmp                                      # F's throughput stays visible, labelled
+
+
+def test_q32_run2_invalid_u_baseline_suppresses_every_ratio(tmp_path):
+    """Astra: with U's repeat differing and all U needles failed, the summary printed 2.00x and exited 0."""
+    sub = tmp_path / "a"; sub.mkdir()
+    r = _run2_fixture(sub, u_rerun_pass=False)
+    out = r.stdout
+    assert r.returncode == 1 and "NOT identical: replay diffs are not attributable" in out and "U baseline invalid" in out, out
+    cmp = out.split("## Comparisons", 1)[1].split("##", 1)[0]
+    rows = [l for l in cmp.splitlines() if l.startswith("| q32-")]
+    assert rows and all("| – |" in l and "U baseline invalid" in l for l in rows), cmp
+    assert "| q32-U | c8 | 100.0 |" in out                                # raw tok/s stay visible
+    sub = tmp_path / "b"; sub.mkdir()
+    _run2_fixture(sub)
+    (sub / "q32-U.needle.json").write_text(json.dumps({"pass": False, "results": [
+        {"len": L, "pass": False, "got": "0"} for L in (8204, 9644, 24044)]}))
+    r = subprocess.run(["python3", str(ROOT / "benchmarks/q32/summarize.py"), str(sub), "--arms", "q32-U q32-Ut q32-F",
+                        "--windows", "1", "--workloads", "c1 c8 m5k-c8", "--run2", "--required", "q32-Ut:q32-U q32-F:q32-U"],
+                       capture_output=True, text=True)
+    assert r.returncode == 1 and "U needles failed at 8204, 9644, 24044" in r.stdout, r.stdout
+    assert not re.search(r"\| \d+\.\d+x", r.stdout.split("## Comparisons", 1)[1].split("##", 1)[0]), "no ratio vs invalid U"
 
 
 # ---------------- run 2 (q32/run2.sh) end to end with fakes: U=8100, Ut=8101, F=8102, K=8103 ----------------------
@@ -1329,7 +1356,6 @@ RUN2_READY = (ROOT / "benchmarks/q32/replay.py").exists() and (ROOT / "benchmark
 
 
 def _q32_run2(tmp_path, extra_env):
-    r, run = None, None
     home = tmp_path / "home"; (home / "models/Qwen3-32B").mkdir(parents=True)
     stub = {}
     for k in ("upstream", "fork"):
@@ -1342,9 +1368,15 @@ export PYTHONPATH="${{PYTHONPATH%%:*}}:{stub['upstream']}"
 exec vllm "$@"
 """)
     upy.chmod(0o755)
+    # needles.py loads AutoTokenizer(local_files_only=True); the fake server counts whitespace words, so the stub
+    # tokenizer does the same (no transformers needed on the CI box)
+    tk = tmp_path / "tokstub/transformers"; tk.mkdir(parents=True)
+    (tk / "__init__.py").write_text(
+        "class _T:\n    def encode(self, text, add_special_tokens=False):\n        return text.split()\n"
+        "class AutoTokenizer:\n    @staticmethod\n    def from_pretrained(path, local_files_only=False):\n        return _T()\n")
     run = tmp_path / "run"; run.mkdir()
     env = dict(os.environ, HOME=str(home), PATH=f"{ROOT/'tests/covex/fake_bin'}:{os.environ['PATH']}",
-               PYTHONPATH=str(stub["fork"]), UPSTREAM_PY=str(upy), UPSTREAM_DIR=str(stub["upstream"]),
+               PYTHONPATH=f"{stub['fork']}:{tk.parent}", UPSTREAM_PY=str(upy), UPSTREAM_DIR=str(stub["upstream"]),
                FORK_DIR=str(stub["fork"]), Q32_MIN_PROCS="1", Q32_WINDOWS="1", Q32_READY_SECS="120", **extra_env)
     r = subprocess.run(["bash", str(ROOT / "benchmarks/q32/run2.sh")], cwd=run, env=env, capture_output=True, text=True, timeout=1200)
     return r, run
@@ -1402,7 +1434,7 @@ def test_run2_stops_at_once_when_u_is_not_ready(tmp_path):
     import time
     t0 = time.time()
     r, run = _q32_run2(tmp_path, {"FAKE_SLOW_READY": "8100:600", "Q32_READY_SECS": "10"})
-    assert r.returncode == 1 and "nothing to compare against" in r.stdout, r.stdout[-3000:]
+    assert r.returncode == 1 and "an arm is not ready: stopping now" in r.stdout, r.stdout[-3000:]
     assert time.time() - t0 < 120 and (run / "RESULTS.md").exists()
     assert subprocess.run(["pgrep", "-f", "fake_server.py"], capture_output=True).returncode != 0, "servers left running"
 
@@ -1419,6 +1451,69 @@ def test_run2_payload_renders_with_pins_deadline_and_run2(tmp_path):
                        capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
     t = out.read_text()
-    assert "@@" not in t and "benchmarks/q32/run2.sh" in t and "Q32_READY_SECS=3000" in t and "Q32_DEADLINE=" in t
+    assert "@@" not in t and "benchmarks/q32/run2.sh" in t and "Q32_DEADLINE=" in t
+    assert "Q32_READY_DEADLINE=$(( $(cat ~/run/BOOT) + 20 * 60 ))" in t, "readiness: 20 min from boot for every arm"
+    assert "UPSTREAM_PREFIX=$HOME/venv-upstream FORK_PREFIX=$V" in t, "provenance must check each arm's environment"
     m = re.search(r"^shutdown -h \+(\d+)", t, re.M)
     assert m and int(m.group(1)) * 8.60 / 60 <= 11.0, "hard stop must stay inside the $11 cap"
+
+
+def _rehearse_run2(tmp_path, extra):
+    home = tmp_path / "home"
+    for d in ["models/Qwen3-32B", "models-small/Qwen3-32B"]:
+        (home / d).mkdir(parents=True)
+    (home / "models/Qwen3-32B/.done").touch()
+    (home / "models/Qwen3-32B/config.json").write_text('{"num_hidden_layers": 2}')
+    run = tmp_path / "run"; run.mkdir()
+    pairs = "q32-T q32-K;q32-U q32-Ut;q32-F"
+    env = _rehearsal_env(tmp_path, home, {"REHEARSAL_PAIRS_A": pairs, "REHEARSAL_PAIRS_B": pairs, **extra})
+    r = subprocess.run(["bash", str(ROOT / "benchmarks/rehearsal/rehearse.sh")], cwd=run, env=env,
+                       capture_output=True, text=True, timeout=900)
+    tsv = (run / "REHEARSAL.tsv").read_text() if (run / "REHEARSAL.tsv").exists() else ""
+    rows = {(l.split("\t")[0], l.split("\t")[1]): l.split("\t")[2] for l in tsv.splitlines() if l}
+    return r, run, rows, tsv
+
+
+@pytest.mark.skipif(not LINUX, reason="Linux CI")
+def test_rehearsal_run2_arms_pass_with_fakes(tmp_path):
+    r, run, rows, tsv = _rehearse_run2(tmp_path, {})
+    for a in ("q32-U", "q32-Ut", "q32-F"):
+        assert rows.get((a, "long-prompt")) == "PASS", tsv
+    for a in ("q32-U", "q32-Ut", "q32-F", "q32-K"):
+        assert rows.get((a, "compile")) == "PASS" and rows.get((a, "compile-alias")) == "PASS", (a, tsv, r.stdout[-2000:])
+    assert "14 lanes (exactly 14 expected)" in tsv, tsv
+    assert r.returncode == 0 and "OVERALL PASS" in (run / "REHEARSAL.md").read_text(), tsv + r.stdout[-2000:]
+
+
+@pytest.mark.skipif(not LINUX, reason="Linux CI")
+def test_rehearsal_ut_missing_trailing_bucket_fails(tmp_path):
+    r, run, rows, tsv = _rehearse_run2(tmp_path, {"FAKE_UT_DROP_BUCKET_PORTS": "8211"})   # Ut compile port
+    assert rows.get(("q32-Ut", "compile-alias")) == "FAIL" and r.returncode == 1, tsv
+
+
+
+@run2_e2e
+def test_run2_k_failure_exits_nonzero(tmp_path):
+    """Astra: a failed K replay printed RUN OK. K is replay-only, but its replay is required."""
+    r, run = _q32_run2(tmp_path, {"FAKE_DIE_AFTER": "8103:1"})          # K dies right after its readiness request
+    assert r.returncode == 1 and "RUN INCOMPLETE" in r.stdout, r.stdout[-3000:]
+    assert re.search(r"REQUIRED q32-K (replay|cache)", r.stdout), r.stdout[-3000:]
+
+
+@run2_e2e
+def test_run2_missing_timing_windows_exit_nonzero(tmp_path):
+    r, run = _q32_run2(tmp_path, {"Q32_DEADLINE": "1"})                  # run deadline already passed: windows skipped
+    assert r.returncode == 1 and "RUN INCOMPLETE" in r.stdout, r.stdout[-3000:]
+    assert "REQUIRED q32-U window c1-w1: missing" in r.stdout, r.stdout[-3000:]
+
+
+@run2_e2e
+def test_run2_stalled_arm_stops_at_the_boot_relative_deadline(tmp_path):
+    import time
+    t0 = time.time()
+    r, run = _q32_run2(tmp_path, {"FAKE_SLOW_READY": "8101:600", "Q32_READY_DEADLINE": str(int(t0) + 20)})
+    took = time.time() - t0
+    assert r.returncode == 1 and "q32-Ut not ready by deadline" in r.stdout and "an arm is not ready: stopping now" in r.stdout, r.stdout[-3000:]
+    assert took < 90, f"took {took:.0f}s for a 20 s deadline"
+    assert not (run / "results/q32-U.replay.json").exists(), "nothing measured after a not-ready arm"
+    assert subprocess.run(["pgrep", "-f", "fake_server.py"], capture_output=True).returncode != 0, "servers left running"

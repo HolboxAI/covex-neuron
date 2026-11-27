@@ -26,7 +26,7 @@ wait_ready() {  # pid port seconds kind [model] [data] -> 0 ready; prints the re
   wait_health "$pid" "$port" "$secs"; rc=$?
   case $rc in 1) echo "process died before /health"; return 1;; 2) echo "no /health within ${secs}s"; return 2;; esac
   # A server can pass /health and still fail its first real request (Qwen3-32B: allocation failure at first decode).
-  local out; out=$(timeout 900 python3 "$LIB_CLIENTS" smoke "$kind" "$port" "$model" "$data" 2>&1) \
+  local out; out=$(timeout "${WAIT_READY_SMOKE_SECS:-900}" python3 "$LIB_CLIENTS" smoke "$kind" "$port" "$model" "$data" 2>&1) \
     || { echo "smoke request failed: $(echo "$out" | tail -1 | cut -c1-200)"; return 3; }
   kill -0 "$pid" 2> /dev/null || { echo "process died after smoke request"; return 1; }
   return 0
@@ -70,8 +70,20 @@ save_evidence() {  # tag path...: copy paths into $EVIDENCE_DIR/<tag> and upload
   return $rc
 }
 
-traces_ok() {  # dir min_files: at least min non-empty files under dir (one device trace per TP rank, at minimum)
-  local n; n=$(find "$1" -type f -size +0 2>/dev/null | wc -l | tr -d ' '); [ "$n" -ge "$2" ] || { echo "$n non-empty trace files < $2"; return 1; }
+traces_ok() {  # dir min_ranks: device traces (*.ntff, non-empty) from at least min_ranks DISTINCT ranks, plus the NEFFs the
+  # runtime copies next to them. Rank identity is read from nc/rank/core numbers in the file names; when the names
+  # carry none, distinct file names are counted and the reason says so. Metadata files or an index.json never count.
+  local n ids
+  n=$(find "$1" -type f -name '*.ntff' -size +0 2>/dev/null | wc -l | tr -d ' ')
+  ids=$(find "$1" -type f -name '*.ntff' -size +0 2>/dev/null | sed -nE 's/.*(nc|rank|core)[_-]?([0-9]+).*/\2/p' | sort -u | wc -l | tr -d ' ')
+  if [ "$ids" -gt 0 ] && [ "$ids" -lt "$2" ]; then echo "traces from $ids distinct ranks < $2 ($n .ntff files)"; return 1; fi
+  [ "$n" -ge "$2" ] || { echo "$n non-empty .ntff traces < $2"; return 1; }
+  neffs_ok "$1" || { echo "no NEFFs copied next to the traces in $1"; return 1; }
+  [ "$ids" -gt 0 ] || echo "rank ids not in trace names; $n distinct .ntff files counted"
+  return 0
+}
+neffs_ok() {  # dir: at least one non-empty compiled program (*.neff) under dir
+  [ -n "$(find "$1" -type f -name '*.neff' -size +0 2>/dev/null | head -1)" ]
 }
 nonempty_dir() {  # dir: at least one non-empty file (an empty NEFF/cache root is not evidence)
   [ -n "$(find "$1" -type f -size +0 2>/dev/null | head -1)" ] || { echo "no non-empty files in $1"; return 1; }

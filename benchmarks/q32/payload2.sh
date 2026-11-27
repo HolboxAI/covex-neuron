@@ -44,7 +44,7 @@ print(json.dumps({"run_prefix": "$P", "instance_type": it[0], "ami": it[1], "reg
   "neuron_packages": [l for l in freeze.splitlines() if any(k in l.lower() for k in ("neuron", "nki", "libneuronxla", "vllm", "torch"))],
   "pip_freeze_sha256": fhash("/home/ubuntu/run/pip_freeze.txt"),
   "timed_arms": ["q32-U", "q32-Ut", "q32-F"], "replay_only_arms": ["q32-K"], "windows": int("@@WINDOWS@@"),
-  "headroom_gib": 7, "decode_context_length_buckets_Ut": [2048, 8192],
+  "headroom_gib": 7, "ready_deadline_min_from_boot": int("@@READY_MIN@@"), "decode_context_length_buckets_Ut": [2048, 8192],
   "workloads": {"c1": {"in": 1024, "out": 256, "n": 8}, "c8": {"in": 1024, "out": 256, "n": 32},
                 "m5k-c8": {"in": "5120 +-20%", "out": 256, "n": 16}}, "seed": 1, "dataset": "random",
   "correctness": {"cache": [1, 3], "replay": {"batch": 8, "tokens": 32, "u_twice": True}, "needles": [8204, 9644, 24044]},
@@ -59,8 +59,9 @@ UP
 chmod +x ~/upload_evidence.sh
 cd ~/run && UPSTREAM_DIR=~/upstream UPSTREAM_PY=~/venv-upstream/bin/python ARM_CACHE_BASE=/var/tmp/covex-arm-cache \
   EVIDENCE_UPLOAD=~/upload_evidence.sh \
-  Q32_WINDOWS=@@WINDOWS@@ Q32_READY_SECS=@@READY_SECS@@ Q32_DEADLINE=$(( $(cat ~/run/BOOT) + 68 * 60 )) \
-  bash ~/covex-neuron/benchmarks/q32/run2.sh
+  UPSTREAM_PREFIX=$HOME/venv-upstream FORK_PREFIX=$V \
+  Q32_WINDOWS=@@WINDOWS@@ Q32_READY_DEADLINE=$(( $(cat ~/run/BOOT) + @@READY_MIN@@ * 60 )) \
+  Q32_DEADLINE=$(( $(cat ~/run/BOOT) + 68 * 60 )) bash ~/covex-neuron/benchmarks/q32/run2.sh
 echo "RUN_EXIT=$?" | tee ~/run/STATUS
 aws s3 sync ~/run s3://$B/$P/ --region $R --only-show-errors --exclude "evidence/*"
 echo "ALLDONE $(cat ~/run/STATUS 2>/dev/null)"

@@ -170,6 +170,9 @@ class H(http.server.BaseHTTPRequestHandler):
                         if r == 5 and on_port("FAKE_PROFILE_DROP_RANK_PORTS"):
                             continue
                         open(os.path.join(d, f"rank{r}.ntff"), "w").write("fake")
+                    if not on_port("FAKE_PROFILE_NO_NEFF_PORTS"):   # the runtime copies the NEFFs next to the traces
+                        os.makedirs(os.path.join(d, "neffs"), exist_ok=True)
+                        open(os.path.join(d, "neffs", "graph.neff"), "w").write("fake")
             return self._send(200, {})
         if os.environ.get("FAKE_FAIL_INFER") == "1" or on_port("FAKE_FAIL_INFER_PORTS"):
             return self._send(500, {"error": "fake inference failure"})

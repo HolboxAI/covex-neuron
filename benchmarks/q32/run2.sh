@@ -39,29 +39,58 @@ export COVEX_PROVENANCE_DIR=$PWD/provenance ARM_CACHE_BASE=${ARM_CACHE_BASE:-$PW
 fresh_dir "$COVEX_PROVENANCE_DIR"; mkdir -p "$ARM_CACHE_BASE"
 declare -A SPID UP RPID
 for a in $ARMS; do Q32_CORES=${CORE[$a]} PROFILE=1 MODELS_DIR=$M pin $a "$F/serve.sh" $a ${PORT[$a]} & SPID[$a]=$!; done
-for a in "${!SPID[@]}"; do   # all arms checked at once; an arm whose process dies is reported as soon as it dies
-  ( why=$(wait_ready "${SPID[$a]}" "${PORT[$a]}" "$READY_SECS" gen m); rc=$?; printf '%s\t%s\n' "$rc" "$why" > "logs/$a.ready" ) & RPID[$a]=$!
+# One boot-relative readiness deadline for every arm (Q32_READY_DEADLINE, epoch seconds; set by the payload to boot + 20
+# min). Health and the first real completion both count against it. A watchdog stops waiting at the deadline, and the
+# first arm that fails ends the run at once: every arm is required, so there is nothing useful to measure without it.
+DEADLINE=${Q32_READY_DEADLINE:-$(( $(date +%s) + READY_SECS ))}
+for a in "${!SPID[@]}"; do
+  ( left=$(( DEADLINE - $(date +%s) )); [ $left -lt 1 ] && left=1
+    why=$(WAIT_READY_SMOKE_SECS=$left wait_ready "${SPID[$a]}" "${PORT[$a]}" "$left" gen m); rc=$?
+    printf '%s\t%s\n' "$rc" "$why" > "logs/$a.ready" ) & RPID[$a]=$!
 done
-for a in "${!RPID[@]}"; do
-  wait "${RPID[$a]}"; IFS=$'\t' read -r rc why < "logs/$a.ready"
-  if [ "$rc" = 0 ]; then UP[$a]=1; status $a ready OK; echo "ARM $a UP"; else status $a ready "FAILED $why"; echo "ARM $a FAILED: $why"; fi
+pending="${!RPID[*]}"
+while [ -n "$pending" ]; do
+  next=""
+  for a in $pending; do
+    if [ -s "logs/$a.ready" ]; then IFS=$'\t' read -r rc why < "logs/$a.ready"
+      if [ "$rc" = 0 ]; then UP[$a]=1; status $a ready OK; echo "ARM $a UP"
+      else status $a ready "FAILED $why"; echo "ARM $a FAILED: $why"; NOTREADY=1; fi
+    else next="$next $a"; fi
+  done
+  pending=${next# }
+  [ -n "${NOTREADY:-}" ] && break
+  if [ -n "$pending" ] && [ "$(date +%s)" -ge "$DEADLINE" ]; then
+    for a in $pending; do status $a ready "FAILED not ready by the boot-relative deadline"; echo "ARM $a not ready by deadline"; done
+    NOTREADY=1; break; fi
+  [ -n "$pending" ] && sleep 2
 done
+for a in "${!RPID[@]}"; do kill "${RPID[$a]}" 2>/dev/null; done
 up() { [ -n "${UP[$1]:-}" ]; }
-finish() {   # summary + exit status; called on every path
+finish() {   # summary + exit status; called on every path. Nonzero unless every required step of every arm ran.
   for a in "${!SPID[@]}"; do stop_arm "${SPID[$a]}"; done
-  python3 "$H/summarize.py" results --arms "$TIMED" --windows "$WINDOWS" --workloads "c1 c8 m5k-c8" --run2 \
-    --required "$(for a in $TIMED; do [ $a = q32-U ] || printf '%s:q32-U ' $a; done)" --status results/STATUS.tsv > RESULTS.md
+  python3 "$H/summarize.py" results --arms "$TIMED" --replay-arms "$REPLAY_ONLY" --windows "$WINDOWS" \
+    --workloads "c1 c8 m5k-c8" --run2 --required "$(for a in $TIMED; do [ $a = q32-U ] || printf '%s:q32-U ' $a; done)" \
+    --status results/STATUS.tsv > RESULTS.md; local srv=$?
   cat RESULTS.md
   local fail=0
-  for a in $TIMED; do up $a || { echo "REQUIRED arm $a not ready"; fail=1; }; done
-  # a FAILED run step of a timed arm fails the run; profile/evidence are diagnostic (stage times unknown), not fatal
+  [ $srv = 0 ] || { echo "summary: required comparisons incomplete or invalid (exit $srv)"; fail=1; }
+  grep -q '^## Best eligible' RESULTS.md || { echo "summary malformed"; fail=1; }
+  for a in $ARMS; do awk -F'\t' -v a="$a" '$1==a && $2=="ready" && $3=="OK"{f=1} END{exit !f}' results/STATUS.tsv 2>/dev/null \
+    || { echo "REQUIRED arm $a not ready"; fail=1; }; done
+  # a FAILED step of any arm fails the run; profile/evidence are diagnostic (stage times unknown), not fatal
   while IFS=$'\t' read -r a step st; do
-    [[ " $TIMED " == *" $a "* || $a == bench || $a == correctness ]] || continue
     [[ $step == profile* || $step == evidence* ]] && continue
     [[ $st == FAIL* ]] && { echo "REQUIRED $a $step: $st"; fail=1; }
   done < results/STATUS.tsv
+  # every arm's replay, and every timed arm's needles and windows, must exist (a step that never ran writes no FAIL)
+  for a in $ARMS; do [ -s results/$a.replay.json ] || { echo "REQUIRED $a replay: no result"; fail=1; }; done
+  [ -s results/q32-U.replay2.json ] || { echo "REQUIRED q32-U repeat replay: no result"; fail=1; }
+  for a in $TIMED; do [ -s results/$a.needle.json ] || { echo "REQUIRED $a needles: no result"; fail=1; }
+    for tag in c1 c8 m5k-c8; do for w in $(seq 1 "$WINDOWS"); do
+      [ -s results/$a-$tag-w$w.json ] || { echo "REQUIRED $a window $tag-w$w: missing"; fail=1; }; done; done; done
   echo "RUN $([ $fail = 0 ] && echo OK || echo INCOMPLETE)"; exit $fail
 }
+[ -n "${NOTREADY:-}" ] && { echo "an arm is not ready: stopping now"; finish; }
 up q32-U || { echo "q32-U not ready: nothing to compare against; stopping now"; finish; }
 
 # --- provenance gate ---------------------------------------------------------------------------------------------
@@ -91,8 +120,12 @@ for conc in 1 3; do P=()   # exact-length prompts at block/bucket/tile boundarie
     python3 $C match results/q32-U.cache.c$conc.json results/$a.cache.c$conc.json > results/$a.vs.q32-U.cache.c$conc.match.json
   done
 done
-replay() { pin $1 python3 "$H/replay.py" run --base-url "$(url $1)" --model m --out "results/$2" --batch 8 --tokens 32 --seed 1 \
-             > "logs/$1.$2.log" 2>&1 || status $1 replay "FAILED rc=$? $(tail -c 200 "logs/$1.$2.log" | tr '\n\t' '  ')"; }
+replay() {   # a replay is valid only with all 8 prompts completed; anything else is a tool/serving failure
+  pin $1 python3 "$H/replay.py" run --base-url "$(url $1)" --model m --out "results/$2" --batch 8 --tokens 32 --seed 1 \
+    > "logs/$1.$2.log" 2>&1
+  python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); sys.exit(0 if d.get("completed")==8 and len(d.get("prompts",[]))==8 else 1)' \
+    "results/$2" 2>/dev/null || { status $1 replay "FAILED $(tail -c 200 "logs/$1.$2.log" | tr '\n\t' '  ')"; rm -f "results/$2"; }
+}
 P=(); for a in $ARMS; do up $a && { replay $a $a.replay.json & P+=($!); }; done; wait_all ${P[@]+"${P[@]}"}
 replay q32-U q32-U.replay2.json   # U twice: the nondeterminism floor for attributing any diff
 for a in $ARMS q32-U.rerun; do
@@ -102,8 +135,18 @@ for a in $ARMS q32-U.rerun; do
 done
 P=(); for a in $ARMS; do up $a && { ( pin $a python3 "$H/needles.py" --base-url "$(url $a)" --model m --tokenizer "$TOK" \
     --lengths 8204,9644,24044 --out results/$a.needle.json > logs/$a.needle.log 2>&1; rc=$?
-    # needles.py exits nonzero when a needle is wrong; that is a finding (in the JSON). No JSON = the step failed.
-    [ -s results/$a.needle.json ] || status $a needles "FAILED rc=$rc no result" ) & P+=($!); }; done
+    # A wrong answer is a finding (pass=false, a real answer in "got"). A tool/serving error (no JSON, wrong lengths, a
+    # row without an answer) is a failed step.
+    v=$(python3 - "results/$a.needle.json" <<'PY' 2>/dev/null
+import json, sys
+d = json.load(open(sys.argv[1])); rows = d.get("results") or []
+ok = sorted(r.get("len") for r in rows) == [8204, 9644, 24044] and all(isinstance(r.get("got"), str) for r in rows)
+print("ANSWERED" if ok else "TOOL " + str(d.get("reason") or [r.get("reason") for r in rows if not isinstance(r.get("got"), str)])[:150])
+json.dump({"pass": bool(d.get("pass")) and ok, "n": len(rows), "lengths": [r.get("len") for r in rows]},
+          open(sys.argv[1].replace(".needle.json", ".vs.q32-U.needle.match.json"), "w"))
+PY
+)
+    [ "$v" = ANSWERED ] || status $a needles "FAILED rc=$rc ${v:-no result}" ) & P+=($!); }; done
 wait_all ${P[@]+"${P[@]}"}
 for a in $REPLAY_ONLY; do [ -n "${SPID[$a]:-}" ] && stop_arm "${SPID[$a]}"; unset "UP[$a]"; done   # replay-only arms are done
 
@@ -152,6 +195,7 @@ for a in $ARMS; do L=logs/$a.server.log; [ -s $L ] || continue
   r=$(grep -q "Using the standalone V2 Neuron model runner" $L && echo MRv2 || { grep -q "Neuron Model Runner V2 does not yet support" $L && echo MRv1 || echo unknown; })
   b=$(grep -m1 -oE "Using decode_context_length_buckets from config: .*" $L | cut -d: -f2- | tr -d ' ' ); b=${b:-none}
   k=$(grep -m1 -oE "KV cache budget: .*" $L | cut -c1-160); k=${k:-unknown}
-  printf '%s\t%s\t%s\t%s\n' "$a" "$r" "$b" "$k" >> results/runner.tsv
+  # the selected decode graph per workload is not logged at INFO by e16d424 / the fork: recorded as unknown, never guessed
+  printf '%s\t%s\t%s\t%s\t%s\n' "$a" "$r" "$b" "c1/c8/m5k-c8 decode graph: unknown (not logged)" "$k" >> results/runner.tsv
 done
 finish

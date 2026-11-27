@@ -22,9 +22,16 @@ def main(port, lengths, k):
             sys.exit(json.dumps({"pass": False, "len": n, "reason": f"HTTP {e.code}: {e.read()[:200]!r}"}))
         except Exception as e:  # connection refused, timeout, server died
             sys.exit(json.dumps({"pass": False, "len": n, "reason": f"{type(e).__name__}: {e}"}))
-        ids = (out.get("choices") or [{}])[0].get("token_ids")
-        if code != 200 or not isinstance(ids, list) or len(ids) != k:
-            sys.exit(json.dumps({"pass": False, "len": n, "reason": f"HTTP {code}, token_ids {ids!r:.80} (expected {k})"}))
+        ch = out.get("choices")
+        if code != 200 or not isinstance(ch, list) or len(ch) != 1:
+            sys.exit(json.dumps({"pass": False, "len": n, "reason": f"HTTP {code}, expected exactly one choice"}))
+        ids, pids = ch[0].get("token_ids"), ch[0].get("prompt_token_ids")
+        if not isinstance(ids, list) or len(ids) != k or not all(type(x) is int and x >= 0 for x in ids):
+            sys.exit(json.dumps({"pass": False, "len": n, "reason": f"token_ids {ids!r:.80} (expected {k} integer ids)"}))
+        # the server must have taken the whole prompt: echoed ids equal to what was sent, or its own token count
+        used = (out.get("usage") or {}).get("prompt_tokens")
+        if not (pids == prompt or (pids is None and used == n)):
+            sys.exit(json.dumps({"pass": False, "len": n, "reason": f"server took {len(pids) if isinstance(pids, list) else used} prompt tokens, sent {n}"}))
         done.append(f"{n} tok -> {k} ids in {time.time() - t0:.0f}s")
     print("; ".join(done))
 

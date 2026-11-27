@@ -26,7 +26,10 @@ LOAD_TAGS = a[a.index("--workloads") + 1].split() if "--workloads" in a else ["c
 LOADS = tuple((t, WORKLOADS[t][0]) for t in LOAD_TAGS)
 REQUIRED = ([tuple(x.split(":")) for x in a[a.index("--required") + 1].split()] if "--required" in a
             else [("q32-K", "q32-U"), ("q32-K", "q32-T")])
-RUN2 = "--run2" in a   # run 2 eligibility adds the fixed-batch replay and the needles to the correctness gate
+RUN2 = "--run2" in a
+REPLAY_ARMS = a[a.index("--replay-arms") + 1].split() if "--replay-arms" in a else []   # correctness only, no timing
+NEEDLE_LENS = [8204, 9644, 24044]
+HARD = ("ready", "provenance", "bench", "import", "replay", "needles", "cache")   # profile/evidence never disqualify   # run 2 eligibility adds the fixed-batch replay and the needles to the correctness gate
 
 
 def windows(arm, c, n):
@@ -80,8 +83,12 @@ def needles_ok(arm):
     if d is None:
         return False, "needles not run"
     res = d.get("results") or []
-    if len(res) != 3 or not d.get("pass") or not all(r.get("pass") for r in res):
-        return False, "needles failed at " + ", ".join(str(r.get("len")) for r in res if not r.get("pass")) if res else "needles empty"
+    if sorted(r.get("len") for r in res) != NEEDLE_LENS:
+        return False, f"needles ran lengths {sorted(r.get('len') for r in res)}, expected {NEEDLE_LENS}"
+    if any(not isinstance(r.get("got"), str) for r in res):
+        return False, "needle tool error at " + ", ".join(str(r.get("len")) for r in res if not isinstance(r.get("got"), str))
+    if not d.get("pass") or not all(r.get("pass") for r in res):
+        return False, "needles failed at " + ", ".join(str(r.get("len")) for r in res if not r.get("pass"))
     return True, ""
 
 
@@ -89,11 +96,26 @@ def replay_ok(arm):
     d = load(f"{R}/{arm}.vs.q32-U.replay.match.json")
     if d is None:
         return False, "replay not run"
+    if d.get("n") != 8:
+        return False, f"replay covered n={d.get('n')}, expected 8"
     if not d.get("pass"):
         mm = d.get("mismatches") or []
         nt = sum(1 for m in mm if m.get("near_tie"))
         return False, f"replay differs on {len(mm)} prompt(s) ({nt} near-tie)"
     return True, ""
+
+
+def baseline():
+    """Reasons U cannot serve as the reference (empty = valid): it must repeat itself exactly on the replay batch and
+    answer all three needles. Without that, no ratio and no equivalence claim is printed against it."""
+    if not RUN2:
+        return []
+    why = [] if replay_ok("q32-U.rerun")[0] else ["U repeat replay: " + replay_ok("q32-U.rerun")[1]]
+    ok, w = needles_ok("q32-U")
+    return why + ([] if ok else ["U " + w])
+
+
+BASE = baseline()
 
 
 def correctness(arm):
@@ -141,7 +163,10 @@ for arm in ARMS:
         for c, _ in LOADS:
             (x, bx), (r, br) = summary[(arm, c)], summary[(ref, c)]
             work = [same_work(load(f"{R}/{arm}-{c}-w{w}.json"), load(f"{R}/{ref}-{c}-w{w}.json")) for w in range(1, W + 1)]
-            steps = [f"{z} step failed: {f}" for z in (arm, ref) for f in failed_steps.get(z, [])][:2]
+            steps = [f"{z} step failed: {f}" for z in (arm, ref) for f in failed_steps.get(z, [])
+                     if f.split()[0].startswith(HARD)][:2]
+            if ref == "q32-U" and BASE:
+                steps.append("U baseline invalid: " + "; ".join(BASE))
             hard = [f"{arm} {b}" for b in bx] + [f"{ref} {b}" for b in br] + [w for ok, w in work if not ok][:1] + steps
             corr_why = [f"cache c{k}: {m[1]}" for k, m in zip((1, 3), corr) if not m[0]]
             if RUN2 and ref == "q32-U":
@@ -167,14 +192,16 @@ if RUN2:
     rr = load(f"{R}/q32-U.rerun.vs.q32-U.replay.match.json")
     print(f"U run twice on the same batch: {'identical' if rr and rr.get('pass') else 'NOT identical: replay diffs are not attributable' if rr else 'not run'}\n")
     print("| Arm | cache c1 | cache c3 | replay | needles 8,204 / 9,644 / 24,044 |\n|---|---|---|---|---|")
-    for arm in ARMS:
+    if BASE:
+        print("**U baseline invalid: " + "; ".join(BASE) + ".** No ratio or equivalence is reported against U; raw tok/s stay visible.\n")
+    for arm in ARMS + REPLAY_ARMS:
         cells = [("ok" if m[0] else m[1]) for m in [match_ok(f"{R}/{arm}.vs.q32-U.cache.c{k}.match.json", 18) for k in (1, 3)]] \
             if arm != "q32-U" else ["reference", "reference"]
         cells += ["reference" if arm == "q32-U" else ("ok" if replay_ok(arm)[0] else replay_ok(arm)[1]),
-                  "ok" if needles_ok(arm)[0] else needles_ok(arm)[1]]
+                  ("not run (replay-only arm)" if arm in REPLAY_ARMS else "ok" if needles_ok(arm)[0] else needles_ok(arm)[1])]
         print(f"| {arm} | " + " | ".join(cells) + " |")
     if os.path.exists(f"{R}/runner.tsv"):
-        print("\n## Runner and graphs per arm (from server logs)\n\n| Arm | runner | decode context buckets | KV budget line |\n|---|---|---|---|")
+        print("\n## Runner and graphs per arm (from server logs)\n\n| Arm | runner | decode context buckets | selected decode graph per workload | KV budget line |\n|---|---|---|---|---|")
         for line in open(f"{R}/runner.tsv"):
             print("| " + " | ".join(line.rstrip("\n").split("\t")) + " |")
 print("\n## Best eligible tested point per arm and workload\n")
@@ -182,11 +209,10 @@ print("Eligible = no failed run step (provenance, profile-independent steps incl
 print("p90 within the pre-registered limits, and (for non-U arms) exact cache-check agreement with U at c1 and c3"
       + (", replay identical to U and all needles passing" if RUN2 else "") + ".\n")
 print("| Arm | Load | median tok/s | Note |\n|---|---|---|---|")
-HARD = ("ready", "provenance", "bench", "import")       # profile/evidence failures do not disqualify throughput
 for arm in ARMS:
     hard_fail = [f for f in failed_steps.get(arm, []) if f.split()[0].startswith(HARD)]
     corr_why = [] if arm == "q32-U" else correctness(arm)
-    why = (["failed step: " + hard_fail[0]] if hard_fail else []) + corr_why
+    why = (["failed step: " + hard_fail[0]] if hard_fail else []) + (["U baseline invalid: " + "; ".join(BASE)] if BASE else []) + corr_why
     if why:
         print(f"| {arm} | – | – | not eligible: {'; '.join(why)} |"); continue
     for c, _ in LOADS:   # one row per workload: tok/s across different workloads are not comparable

@@ -145,7 +145,8 @@ def test_profile_success_writes_eight_distinct_rank_traces(tmp_path):
     d = tmp_path / "profiles/q32-U"
     with Server({"FAKE_PROFILE_DIR": str(d)}) as s:
         s.post("/start_profile", {}); s.post("/stop_profile", {})
-    assert sorted(p.name for p in d.iterdir()) == [f"rank{r}.ntff" for r in range(8)]
+    assert sorted(p.name for p in d.glob("*.ntff")) == [f"rank{r}.ntff" for r in range(8)]
+    assert (d / "neffs/graph.neff").exists()
 
 
 def _serve(cfg, env):
@@ -204,7 +205,7 @@ def _bench(tmp_path, port, extra_args=(), env=None):
 
 
 def test_fake_bench_detailed_fields_and_range_ratio(tmp_path):
-    r, d = _bench(tmp_path, 8100, ["--save-detailed", "--random-range-ratio", "0.2"])
+    r, d = _bench(tmp_path, 8100, ["--save-detailed", "--random-range-ratio", '{"input":0.2,"output":0}'])
     assert r.returncode == 0, r.stderr
     for k in ("ttfts", "itls", "output_lens", "input_lens", "e2els"):
         assert isinstance(d[k], list) and len(d[k]) == d["completed"] == 8, k
@@ -246,6 +247,69 @@ def test_rehearsal_covers_run2_arms_and_requires_long_prompts():
     subprocess.run(["bash", "-n", str(ROOT / "benchmarks/rehearsal/rehearse.sh")], check=True)
     assert "q32-Ut) echo 8011" in sh and "long_prompt.py" in sh and "q32-Ut:compile-alias" in sh
     assert 'LONG_ARMS=${REHEARSAL_LONG_ARMS:-"q32-U q32-Ut q32-F"}' in sh
-    assert "fail_on_recompile|recompil" in sh
+    assert "RECOMPILE_RE=" in sh
     # exact arm matching: no substring test that would let q32-U match q32-Ut
     assert '== *"$a"* ]]' not in sh
+
+
+def test_fake_bench_range_ratio_matches_vllm_029(tmp_path):
+    """A bare ratio varies output lengths too (vLLM 0.29); the JSON form keeps output exactly 256."""
+    import json, os, subprocess
+    from pathlib import Path
+    root = Path(__file__).resolve().parents[2]
+    def bench(rr):
+        r = subprocess.run([str(root / "tests/covex/fake_bin/vllm"), "bench", "serve", "--base-url", "http://127.0.0.1:8100",
+                            "--num-prompts", "16", "--random-input-len", "5120", "--random-output-len", "256",
+                            "--random-range-ratio", rr, "--save-detailed", "--result-dir", str(tmp_path), "--result-filename", "x.json"],
+                           capture_output=True, text=True, env=dict(os.environ))
+        assert r.returncode == 0, r.stderr
+        return json.load(open(tmp_path / "x.json"))
+    d = bench("0.2")
+    assert len(set(d["output_lens"])) > 1 and d["total_output_tokens"] != 16 * 256
+    d = bench('{"input":0.2,"output":0}')
+    assert d["output_lens"] == [256] * 16 and d["total_output_tokens"] == 4096
+    assert min(d["input_lens"]) >= 4096 and max(d["input_lens"]) <= 6144 and len(set(d["input_lens"])) > 1
+    assert all(len(x) == 255 for x in d["itls"])
+
+
+def test_rehearsal_recompile_regex_passes_real_stock_log_and_catches_recompiles(tmp_path):
+    """Astra: `recompil` as a substring matched "Precompile: OFF" in every successful stock log (a false FAIL)."""
+    import re, subprocess
+    from pathlib import Path
+    root = Path(__file__).resolve().parents[2]
+    rx = re.search(r"^RECOMPILE_RE='([^']+)'", (root / "benchmarks/rehearsal/rehearse.sh").read_text(), re.M).group(1)
+    grep = lambda f: subprocess.run(["grep", "-qiE", rx, str(f)]).returncode == 0
+    real = root / "tests/covex/fixtures/real_stock_precompile_line.log"
+    assert "Precompile: OFF" in real.read_text() and not grep(real)
+    for bad in ("torch._dynamo hit config.recompile_limit (8)", "RuntimeError: fail_on_recompile is set",
+                "Recompiling function forward in model.py"):
+        f = tmp_path / "x.log"; f.write_text(real.read_text() + bad + "\n")
+        assert grep(f), bad
+
+
+def test_long_prompt_probe_rejects_truncated_prompt_and_null_ids(tmp_path):
+    """Astra: one input token and eight null ids passed as '24044 tok -> 8 ids'."""
+    import json, subprocess, sys, threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+    from pathlib import Path
+    root = Path(__file__).resolve().parents[2]
+    mode = {}
+    class Hd(BaseHTTPRequestHandler):
+        def log_message(self, *a): pass
+        def do_POST(self):
+            body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            p = body["prompt"]
+            c = {"null": {"token_ids": [None] * 8, "prompt_token_ids": p},
+                 "trunc": {"token_ids": [1] * 8, "prompt_token_ids": p[:1]},
+                 "ok": {"token_ids": [1] * 8, "prompt_token_ids": p}}[mode["m"]]
+            out = json.dumps({"choices": [c], "usage": {"prompt_tokens": len(c["prompt_token_ids"])}}).encode()
+            self.send_response(200); self.send_header("Content-Length", str(len(out))); self.end_headers(); self.wfile.write(out)
+    srv = HTTPServer(("127.0.0.1", 0), Hd); threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        for m, want in (("null", 1), ("trunc", 1), ("ok", 0)):
+            mode["m"] = m
+            r = subprocess.run([sys.executable, str(root / "benchmarks/rehearsal/long_prompt.py"), str(srv.server_port), "9644", "8"],
+                               capture_output=True, text=True, timeout=60)
+            assert (r.returncode != 0) == bool(want), (m, r.stdout, r.stderr)
+    finally:
+        srv.shutdown()
