@@ -11,7 +11,7 @@ STAGES = [("queue", "vllm:request_queue_time_seconds"), ("prefill", "vllm:reques
 def hist(path):
     out = {}
     for line in open(path):
-        m = re.match(r"^(vllm:[a-z_]+?)_(sum|count)(\{[^}]*\})?\s+([0-9.eE+-]+)$", line.strip())
+        m = re.match(r"^(vllm:[a-z0-9_]+?)_(sum|count)(\{[^}]*\})?\s+([0-9.eE+-]+)$", line.strip())
         if m:
             out[(m.group(1), m.group(2))] = out.get((m.group(1), m.group(2)), 0.0) + float(m.group(4))
     return out

@@ -12,9 +12,9 @@ start_all 0                                              # compiles in parallel;
 python3 "$HERE/prompt_tokens.py" 8000 "${CLIENT_DIR:-$HOME/qwen3-asr-inference-cuda-trainium}" 200 | tee prompt_tokens.json
 # 200 clips x 3 rounds = 600 requests per concurrency level (75 waves at c8); repeated 3x for the median.
 for rep in 1 2 3; do
-  for i in "${!ARMS[@]}"; do "$HERE/bench.sh" "${ARMS[$i]}-r$rep" "$((8000 + i))" 200 1,4,8,16 & done; wait
+  P=(); for i in "${!ARMS[@]}"; do "$HERE/bench.sh" "${ARMS[$i]}-r$rep" "$((8000 + i))" 200 1,4,8,16 & P+=($!); done; wait "${P[@]}"
 done
-for i in "${!ARMS[@]}"; do ROUNDS=1 "$HERE/bench.sh" "${ARMS[$i]}-wer" "$((8000 + i))" 2620 16 & done; wait   # full test-clean WER, every arm
+P=(); for i in "${!ARMS[@]}"; do ROUNDS=1 "$HERE/bench.sh" "${ARMS[$i]}-wer" "$((8000 + i))" 2620 16 & P+=($!); done; wait "${P[@]}"   # full test-clean WER, every arm
 stop_all
 "$HERE/stage_pass.sh"                                     # per-stage pass (S2, D at c1/c8): metrics, py-spy, device profiles
 stop_all

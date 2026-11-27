@@ -9,7 +9,7 @@ from collections import defaultdict
 def hist(path):
     s, c = defaultdict(float), defaultdict(float)
     for line in open(path):
-        m = re.match(r'^(vllm:[a-z_]+?)_(sum|count)(\{[^}]*\})?\s+([0-9.eE+-]+)$', line.strip())
+        m = re.match(r'^(vllm:[a-z0-9_]+?)_(sum|count)(\{[^}]*\})?\s+([0-9.eE+-]+)$', line.strip())
         if m:
             (s if m[2] == "sum" else c)[m[1]] += float(m[4])
     return s, c
