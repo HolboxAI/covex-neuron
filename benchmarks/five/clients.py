@@ -5,7 +5,10 @@
   gen   <port> <out.json>                            20 fixed greedy prompts, 64 tokens (T/C output match)
   match <T.json> <C.json>                            compare saved outputs: exact-text match rate, or embedding cosine
 """
-import asyncio, base64, json, statistics, sys, time
+import asyncio, base64, json, os, statistics, sys, time
+# PROBE_N / PROBE_TOKENS shrink requests for the CPU-mode rehearsal (CPU decode is ~1 tok/s); unset on Trainium.
+PROBE_N = int(os.environ.get("PROBE_N", "0")) or None
+PROBE_TOKENS = int(os.environ.get("PROBE_TOKENS", "64"))
 from pathlib import Path
 import httpx
 
@@ -44,7 +47,7 @@ def vl(port, d, n, conc, out):
         content = [{"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{img}"}},
                    {"type": "text", "text": m["question"] + "\nAnswer with the option letter only."}]
         return c.post(f"http://127.0.0.1:{port}/v1/chat/completions",
-                      json={"model": "m", "messages": [{"role": "user", "content": content}], "max_tokens": 64, "temperature": 0})
+                      json={"model": "m", "messages": [{"role": "user", "content": content}], "max_tokens": PROBE_TOKENS, "temperature": 0})
     asyncio.run(run_pool(2, 2, make))
     wall, lat, outs = asyncio.run(run_pool(n, conc, make))
     toks = sum(o["usage"]["completion_tokens"] for o in outs.values())
@@ -53,9 +56,10 @@ def vl(port, d, n, conc, out):
 
 def gen(port, out):
     make = lambda c, i: c.post(f"http://127.0.0.1:{port}/v1/completions",
-                               json={"model": "m", "prompt": PROMPTS[i], "max_tokens": 64, "temperature": 0})
-    wall, lat, outs = asyncio.run(run_pool(len(PROMPTS), 4, make))
-    json.dump({"answers": [outs[i]["choices"][0]["text"] for i in range(len(PROMPTS))]}, open(out, "w"))
+                               json={"model": "m", "prompt": PROMPTS[i], "max_tokens": PROBE_TOKENS, "temperature": 0})
+    n = min(PROBE_N or len(PROMPTS), len(PROMPTS))
+    wall, lat, outs = asyncio.run(run_pool(n, 4, make))
+    json.dump({"answers": [outs[i]["choices"][0]["text"] for i in range(n)]}, open(out, "w"))
 
 def match(a, b):
     A, B = json.load(open(a)), json.load(open(b))

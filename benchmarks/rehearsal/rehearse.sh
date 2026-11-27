@@ -42,13 +42,14 @@ stop() { pkill -f -- "--port $1( |$)"; sleep 5; pkill -9 -f -- "--port $1( |$)";
 cpu_probe() {  # arm port
   case $1 in
     q32-*) timeout 900 python3 $C gen $2 results/$1.cpu.gen.json ;;
-    emb-*) timeout 900 python3 $C emb $2 $D/embed/t256.jsonl 64 32 results/$1.cpu.json ;;   # 32 concurrent -> packed prefills on C
+    emb-*) timeout 900 python3 $C emb $2 $D/embed/t256.jsonl 32 32 results/$1.cpu.json ;;   # 32 concurrent -> packed prefills on C
     vl-*)  timeout 900 python3 $C vl $2 $D/vl 4 2 results/$1.cpu.json ;;
-    asr-*) ROUNDS=1 SOLO=1 timeout 900 "$A/bench.sh" $1-cpu $2 8 1,4 ;;
+    asr-*) ROUNDS=1 SOLO=1 timeout 900 "$A/bench.sh" $1-cpu $2 4 1,4 ;;
   esac
 }
 track_a() {
-  export VLLM_NEURON_CPU_MODE=1 REHEARSAL_EXTRA="--gpu-memory-utilization 0.2"
+  # CPU decode runs ~1 tok/s: probes check that real requests complete, not speed (4 prompts x 8 tokens, 4 images, 4 clips).
+  export VLLM_NEURON_CPU_MODE=1 REHEARSAL_EXTRA="--gpu-memory-utilization 0.2" PROBE_N=4 PROBE_TOKENS=8
   for pair in "q32-T q32-C" "emb-T emb-C" "vl-T vl-C" "asr-T asr-C"; do
     i=0; for a in $pair; do serve cpu $a 100 $HOME/models-small "$((i*8))-$((i*8+7))" & SPID[$a]=$!; i=$((i+1)); done
     for a in $pair; do p=$(( $(port $a) + 100 )); L=$(log_of $a cpu)
