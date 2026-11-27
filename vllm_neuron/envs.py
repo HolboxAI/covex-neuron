@@ -46,6 +46,8 @@ if TYPE_CHECKING:
     VLLM_NEURON_SWITCH_CC: bool = False
     VLLM_NEURON_MIN_KV_BUDGET_GIB: float = 1.0
     VLLM_NEURON_KV_GMU_BUDGET_CAP_FRACTION: float = 0.30
+    # COVEX: Qwen3 decode (nkh == 1 path, BF16 KV) writes new K/V inside the attention kernel instead of index_put_.
+    COVEX_QWEN3_INKERNEL_KV_WRITE: bool = False
     VLLM_NEURON_RESERVED_HEADROOM_GIB: float | None = None
     VLLM_NEURON_WORKER_TERMINATION_TIMEOUT: int = 5
     VLLM_NEURON_NIXL_PROGRESS_THREAD_DELAY_US: int = 0
@@ -322,6 +324,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
         else 1.0
     ),
     # Default KV cap for the memory-utilization budget.
+    "COVEX_QWEN3_INKERNEL_KV_WRITE": lambda: (
+        maybe_convert_bool(os.getenv("COVEX_QWEN3_INKERNEL_KV_WRITE")) or False
+    ),
     "VLLM_NEURON_KV_GMU_BUDGET_CAP_FRACTION": lambda: (
         maybe_convert_float(os.getenv("VLLM_NEURON_KV_GMU_BUDGET_CAP_FRACTION"))
         if os.getenv("VLLM_NEURON_KV_GMU_BUDGET_CAP_FRACTION") is not None
