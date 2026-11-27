@@ -24,6 +24,10 @@ arm_config() {
          buckets='"num_batched_tokens_bucket_step": 128,'; extra='"max_prefills_per_batch": 2,' ;;
     DE1) export VLLM_NEURON_ASR_AUDIO_MLP_NKI=1; enc_dp=1 ;;
     T4)  ARM_TP=4; enc_dp=4 ;;
+    # run-2 campaign arms (no encoder kernel: DL lost 10% at c8). R* = one TP4 replica; serve_replicas.sh runs two.
+    DMB) buckets='"num_batched_tokens_bucket_step": 128,'; extra='"max_prefills_per_batch": 2,' ;;   # TP8: #3 + #5
+    R4)  ARM_TP=4; enc_dp=4 ;;                                                                     # stock config, TP4
+    RDMB) ARM_TP=4; enc_dp=4; buckets='"num_batched_tokens_bucket_step": 128,'; extra='"max_prefills_per_batch": 2,' ;;
     *) echo "unknown arm $arm" >&2; return 2 ;;
   esac
   cat <<JSON

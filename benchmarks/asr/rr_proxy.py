@@ -1,0 +1,100 @@
+#!/usr/bin/env python3
+"""Round-robin HTTP front for N replicas of one model, so the unchanged ASR client can drive "2 x TP4 on two chips"
+exactly like "1 x TP8". Usage: rr_proxy.py <listen_port> <backend_port> [<backend_port> ...]
+
+- Each request goes to the next replica (per request, not per connection: the client keeps connections alive).
+- Responses are streamed through as they arrive (chat_stream phase), close-delimited (HTTP/1.0 style).
+- GET /health is 200 only when every replica is healthy.
+- GET /metrics concatenates every replica's /metrics, so counter sums (e.g. e2e_request_latency count) cover both.
+- Backlog 2048: concurrent bursts queue instead of being reset.
+The proxy adds one local hop; its overhead is measured by running the 1-replica layout through it as well.
+"""
+import http.server
+import itertools
+import sys
+import threading
+
+import httpx
+
+HOP = {"connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailers", "transfer-encoding",
+       "upgrade", "content-length", "host"}
+
+
+def make_handler(backends):
+    rr = itertools.cycle(backends)
+    lock = threading.Lock()
+    client = httpx.Client(timeout=httpx.Timeout(1800, connect=10), limits=httpx.Limits(max_connections=512))
+
+    def nxt():
+        with lock:
+            return next(rr)
+
+    class H(http.server.BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.0"
+
+        def log_message(self, *a):
+            pass
+
+        def _all(self, path):
+            outs = []
+            for b in backends:
+                try:
+                    r = client.get(f"http://127.0.0.1:{b}{path}", timeout=10)
+                    outs.append((r.status_code, r.content))
+                except httpx.HTTPError:
+                    outs.append((502, b""))
+            return outs
+
+        def _reply(self, code, body, ctype="text/plain"):
+            self.send_response(code); self.send_header("Content-Type", ctype); self.send_header("Content-Length", str(len(body)))
+            self.end_headers(); self.wfile.write(body)
+
+        def _forward(self, method):
+            n = int(self.headers.get("Content-Length") or 0)
+            body = self.rfile.read(n) if n else None
+            headers = {k: v for k, v in self.headers.items() if k.lower() not in HOP}
+            port = nxt()
+            try:
+                with client.stream(method, f"http://127.0.0.1:{port}{self.path}", content=body, headers=headers) as r:
+                    self.send_response(r.status_code)
+                    for k, v in r.headers.items():
+                        if k.lower() not in HOP:
+                            self.send_header(k, v)
+                    self.send_header("Connection", "close")
+                    self.end_headers()
+                    for chunk in r.iter_raw():
+                        self.wfile.write(chunk); self.wfile.flush()
+            except httpx.HTTPError as e:
+                self._reply(502, f"replica {port}: {type(e).__name__}".encode())
+
+        def do_GET(self):
+            if self.path == "/health":
+                outs = self._all("/health")
+                return self._reply(200 if all(c == 200 for c, _ in outs) else 503, b"")
+            if self.path == "/metrics":
+                outs = self._all("/metrics")
+                if not all(c == 200 for c, _ in outs):
+                    return self._reply(502, b"")
+                return self._reply(200, b"\n".join(b for _, b in outs))
+            self._forward("GET")
+
+        def do_POST(self):
+            self._forward("POST")
+
+    return H
+
+
+class Srv(http.server.ThreadingHTTPServer):
+    request_queue_size = 2048
+    daemon_threads = True
+
+
+def main(argv):
+    if len(argv) < 3:
+        sys.exit("usage: rr_proxy.py <listen_port> <backend_port> [<backend_port> ...]")
+    listen, backends = int(argv[1]), [int(x) for x in argv[2:]]
+    Srv(("127.0.0.1", listen), make_handler(backends)).serve_forever()
+
+
+if __name__ == "__main__":
+    main(sys.argv)

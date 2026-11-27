@@ -43,12 +43,21 @@ class Model:
     tp: int
     loads: tuple
     unit: str
+    replicas: int = 1     # >1: that many TP-sized replicas share the arm's chip pair behind asr/rr_proxy.py
+
+
+# ASR arm -> asr/arm_config.sh label. DL (encoder LN-in-MLP kernel) lost 10% at c8, so the fork arms use the
+# scheduling changes instead: DMB = 2 prefills/step + linear 128-token buckets; R* = one TP4 replica each.
+ASR_LABELS = {"asr-U": "S2", "asr-DMB": "DMB", "asr-U2": "R4", "asr-R": "RDMB"}
 
 
 WAVES = (
     (Model("Qwen3-32B", "q32-U", "q32-F", "gen", 8, (1, 8), "output tok/s"),
      Model("Qwen3-Embedding-8B", "emb-U", "emb-P8", "emb", 8, (32,), "sequences/s"),
-     Model("Qwen3-ASR-1.7B", "asr-U", "asr-DL", "asr", 8, (1, 8), "audio seconds/s")),
+     Model("Qwen3-ASR-1.7B", "asr-U", "asr-DMB", "asr", 8, (1, 8), "audio seconds/s"),
+     # same two chips: upstream 2 x TP4 vs fork 2 x TP4 + scheduling (equal layout); asr-U vs asr-U2 is the
+     # layout-only gain upstream can also take, reported in the same table
+     Model("Qwen3-ASR-1.7B", "asr-U2", "asr-R", "asr", 4, (1, 8), "audio seconds/s", replicas=2)),
     (Model("Llama-3.1-8B-Instruct", "llama-U", "llama-F", "gen", 8, (1, 8), "output tok/s"),
      Model("Qwen3-VL-32B-Instruct", "vl-U", "vl-C", "vl", 4, (4,), "output tok/s"),
      Model("gpt-oss-20b", "oss-U", "oss-P", "gen", 8, (1, 4), "output tok/s")),
@@ -290,6 +299,19 @@ def write_summary(out, rows):
     (out / "RESULTS.md").write_text("\n".join(lines) + "\n")
 
 
+def check_wave_fits(wave):
+    """2 arms per model, one chip pair (8 logical cores) and 24 vCPUs per arm: at most 8 arms per trn2.48xlarge."""
+    if 2 * len(wave) > 8:
+        raise ValueError(f"wave of {len(wave)} models needs {2 * len(wave)} chip pairs; the host has 8")
+    for m in wave:
+        if m.tp * m.replicas > 8:
+            raise ValueError(f"{m.folder}: {m.replicas} x TP{m.tp} does not fit one chip pair")
+
+
+for _w in WAVES:
+    check_wave_fits(_w)
+
+
 def run_wave(wave, out, args, base, roots, prefixes):
     models_dir = Path(base.get("MODELS_DIR", Path.home() / "models")).resolve()
     data = Path(base.get("SIX_DATA", Path.home() / "data/sixdata")).resolve()
@@ -301,7 +323,8 @@ def run_wave(wave, out, args, base, roots, prefixes):
             for side, arm in enumerate((model.stock, model.fork)):
                 slot = 2 * index + side
                 port = 8600 + slot
-                cpus = f"{32*slot}-{32*slot+31}"
+                # 8 arm slots per wave (16 chips): 24 host vCPUs each fill the 192-vCPU host exactly
+                cpus = f"{24*slot}-{24*slot+23}"
                 cwd = out / arm
                 cwd.mkdir()
                 places[arm] = cwd
@@ -309,7 +332,8 @@ def run_wave(wave, out, args, base, roots, prefixes):
                 prov.mkdir()
                 cache = cwd / "cache"
                 interpreter = base["UPSTREAM_PY" if side == 0 else "FORK_PY"]
-                env = dict(base, SUITE_PYTHON=interpreter, SUITE_CORES=f"{8*slot}-{8*slot+model.tp-1}",
+                env = dict(base, SUITE_PYTHON=interpreter, SUITE_CPUS=cpus,
+                           SUITE_CORES=f"{8*slot}-{8*slot+model.tp*model.replicas-1}",
                            MODELS_DIR=str(models_dir), MODEL_DIR=str(models_dir / model.folder),
                            COVEX_ARM=arm, COVEX_PROVENANCE_DIR=str(prov), ARM_CACHE_BASE=str(cache),
                            PYTHONPATH=str(BENCH / "provenance"), SOLO="1", ROUNDS="1", EMB_ALL_VECTORS="1",
@@ -331,8 +355,9 @@ def run_wave(wave, out, args, base, roots, prefixes):
                         client_dir = Path(base["CLIENT_DIR"])
                         if (client_dir / ".git").exists() and not git_head(client_dir).startswith("4ce1ddb"):
                             raise ValueError("prepare ASR benchmark client at 4ce1ddb before starting the suite")
-                        label = "S2" if side == 0 else "DL"
-                        argv = [BENCH / "asr/serve.sh", label, str(slot), str(port)]
+                        label = ASR_LABELS[arm]
+                        script = "asr/serve_replicas.sh" if model.replicas > 1 else "asr/serve.sh"
+                        argv = [BENCH / script, label, str(slot), str(port)]
                     else:
                         label = arm
                         argv = [BENCH / "five/serve.sh", arm, str(port)]
@@ -347,8 +372,10 @@ def run_wave(wave, out, args, base, roots, prefixes):
             try:
                 future.result()
                 model, _, cwd, _, _, _, label, side = jobs[arm]
+                logs = ",".join(f"{cwd}/logs/{label}.r{r}.server.log" for r in range(model.replicas)) \
+                    if model.replicas > 1 else f"{cwd}/logs/{label}.server.log"
                 command([sys.executable, str(BENCH / "provenance/verify.py"), str(cwd / "provenance"),
-                         str(model.tp + 2), "--tp", str(model.tp), "--log", f"{arm}={cwd}/logs/{label}.server.log",
+                         str((model.tp + 2) * model.replicas), "--tp", str(model.tp), "--log", f"{arm}={logs}",
                          f"{arm}={roots[side]}@{prefixes[side]}"], cwd, base, cwd / "provenance.log", 30)
             except (RuntimeError, OSError, subprocess.SubprocessError) as exc:
                 errors[arm] = f"{arm}: {exc}"

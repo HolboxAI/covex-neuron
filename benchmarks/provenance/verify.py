@@ -1,5 +1,5 @@
 """Check per-process provenance records for each arm. Usage:
-  verify.py <provenance_dir> <min_procs> [--tp N --log ARM=server.log ...] ARM=EXPECTED_ROOT[@EXPECTED_PREFIX] [...]
+  verify.py <provenance_dir> <min_procs> [--tp N --log ARM=server.log[,replica2.log] ...] ARM=EXPECTED_ROOT[@EXPECTED_PREFIX] [...]
 With --tp/--log, TP0..TP(N-1) and EngineCore are taken from vLLM's own log prefixes and each must have a record, so
 surplus helper processes cannot stand in for a missing worker rank.
 Each arm needs >= min_procs records (API server + engine + TP workers). In every record vllm_neuron must resolve under
@@ -67,10 +67,12 @@ def verify(pdir, min_procs, expect, tp=0, logs=None):
         if len(lib) != 1 or None in lib:
             why.append(f"NEURON_LIBTORCH_CACHE_ROOT {sorted(map(str, lib))} (need exactly one per arm)")
         if tp and logs and arm in logs:   # every TP rank (and the engine) must be a recorded process, by PID from the log
-            roles = log_ranks(logs[arm]); pids = {r.get("pid") for r in rs}
-            miss = [k for k in [f"TP{i}" for i in range(tp)] + ["EngineCore"] if roles.get(k) not in pids]
-            if miss:
-                why.append(f"no provenance record for {miss} (log pids {[roles.get(k) for k in miss]})")
+            pids = {r.get("pid") for r in rs}
+            for lp in logs[arm].split(","):   # replicas: one log per replica, each with its own TP ranks + engine
+                roles = log_ranks(lp)
+                miss = [k for k in [f"TP{i}" for i in range(tp)] + ["EngineCore"] if roles.get(k) not in pids]
+                if miss:
+                    why.append(f"{os.path.basename(lp)}: no provenance record for {miss} (log pids {[roles.get(k) for k in miss]})")
         shared = sorted(b for b in expect if b != arm and {v for _, v in caches[arm]} & {v for _, v in caches[b]})
         if shared:
             why.append(f"shares a compile-cache path with {shared}")

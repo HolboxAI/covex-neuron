@@ -78,3 +78,18 @@ def test_live_modalities_require_matched_work(tmp_path):
         assert all(r["ratio"] is None for r in report(model, dirs, {}, 1))
         (dirs[model.fork] / f"c{model.loads[0]}-w1.json").write_text("[]")
         assert "must contain a JSON object" in next(report(model, dirs, {}, 1))["status"]
+
+
+
+def test_asr_replica_row_layout_and_labels():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("six", Path(__file__).resolve().parents[2] / "benchmarks/six/run.py")
+    six = importlib.util.module_from_spec(spec); spec.loader.exec_module(six)
+    asr = [m for w in six.WAVES for m in w if m.kind == "asr"]
+    assert {(m.stock, m.fork, m.tp, m.replicas) for m in asr} == {("asr-U", "asr-DMB", 8, 1), ("asr-U2", "asr-R", 4, 2)}
+    assert all(six.ASR_LABELS[a] for m in asr for a in (m.stock, m.fork))
+    for w in six.WAVES:
+        six.check_wave_fits(w)
+    import pytest
+    with pytest.raises(ValueError):
+        six.check_wave_fits(tuple(w for wave in six.WAVES for w in wave))   # all models in one wave cannot fit

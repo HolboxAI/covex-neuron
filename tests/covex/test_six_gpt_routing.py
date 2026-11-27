@@ -15,7 +15,7 @@ SUITE = ROOT / "benchmarks/six/run.py"
 
 def test_six_plan_keeps_gpt_diagnostic_separate():
     plan = subprocess.check_output([sys.executable, str(SUITE), "--plan"], text=True)
-    assert len(plan.splitlines()) == 6
+    assert len(plan.splitlines()) == 7   # + ASR 2 x TP4 replica row (Claude, equal-layout comparator)
     assert "oss-U vs oss-P," in plan and "oss-P8k" not in plan
     diag = subprocess.check_output([sys.executable, str(SUITE), "--plan", "--gpt-padded-diagnostic-only"], text=True)
     assert "diagnostic only" in diag and "oss-U8k vs oss-P8k," in diag

@@ -7,7 +7,9 @@ HERE=$(cd "$(dirname "$0")" && pwd); source "$HERE/arm_config.sh"
 MODEL_DIR=${MODEL_DIR:-$HOME/models/Qwen3-ASR-1.7B}
 arm_config "$ARM" > /dev/null; CFG=$(arm_config "$ARM")
 # vllm-neuron multiproc requires NEURON_VISIBLE_DEVICES (logical-core range "a-b"); NEURON_RT_VISIBLE_CORES is rejected.
-[ "${VLLM_NEURON_CPU_MODE:-0}" = 1 ] || export NEURON_VISIBLE_DEVICES="$((PAIR * 8))-$((PAIR * 8 + ARM_TP - 1))"
+# REPLICA=r puts a TP4 replica on the second chip of the pair (cores +4..+7); serve_replicas.sh sets it.
+OFF=$(( ${REPLICA:-0} * 4 ))
+[ "${VLLM_NEURON_CPU_MODE:-0}" = 1 ] || export NEURON_VISIBLE_DEVICES="$((PAIR * 8 + OFF))-$((PAIR * 8 + OFF + ARM_TP - 1))"
 read -r -a REH_ARGS <<< "${REHEARSAL_EXTRA:-}"   # own name: arms use $EXTRA for config fragments
 export TORCH_DEVICE_BACKEND_AUTOLOAD=0 NEURON_LIBTORCH_COMPILATION_TIMEOUT=1800 NEURON_SKIP_EFA_AFFINITY=1
 PROF_ARGS=()
@@ -23,6 +25,7 @@ mkdir -p logs
 # Equal, disjoint host CPUs per arm (8 arms x 24 vCPUs on the 192-vCPU host) so arms do not steal host time
 # from each other. SOLO=1 drops the pinning for the solo S2 re-run.
 CPUS="$((PAIR * 24))-$((PAIR * 24 + 23))"; PIN=(taskset -c "$CPUS"); [ "${SOLO:-0}" = 1 ] && PIN=()
+[ -n "${REPLICA_CPUS:-}" ] && PIN=(taskset -c "$REPLICA_CPUS")   # replicas split their arm's CPU range
 echo "cpus=${PIN[*]:-all}" >> "logs/$ARM${LOG_TAG:-}.meta"
 VLLM=(vllm)
 if [ -n "${SUITE_PYTHON:-}" ]; then VLLM=("$SUITE_PYTHON" -m vllm.entrypoints.cli.main); fi
