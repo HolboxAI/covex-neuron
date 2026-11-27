@@ -3,7 +3,7 @@
 #  - liveness is the PID we started, never `pgrep --port` (misses a server until serve.sh execs vllm);
 #  - /health is not readiness: an arm is READY only after a real inference request succeeds;
 #  - never a bare `wait` (servers never exit) and never `wait a b` (returns only b's status): use wait_all;
-#  - stop only our own arms, by PID tree and port, never `pkill -f "vllm serve"`.
+#  - stop only our own arms, by PID tree, never by command-line pattern (`pkill -f`).
 LIB_CLIENTS=${LIB_CLIENTS:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/five/clients.py}
 
 killtree() {  # pid signal: signal the pid and all its descendants, children first
@@ -32,11 +32,12 @@ wait_ready() {  # pid port seconds kind [model] [data] -> 0 ready; prints the re
   return 0
 }
 
-stop_arm() {  # pid port: stop exactly this arm
-  [ -n "${1:-}" ] && killtree "$1" TERM
-  pkill -f -- "--port $2( |$)" 2>/dev/null; sleep 3
-  [ -n "${1:-}" ] && killtree "$1" KILL
-  pkill -9 -f -- "--port $2( |$)" 2>/dev/null; true
+stop_arm() {  # pid [port]: stop exactly this arm. PID tree only: a `pkill -f "--port N"` pattern also matches any
+  # shell whose command line contains that text (it killed the test harness itself), so it is not used.
+  [ -n "${1:-}" ] || return 0
+  killtree "$1" TERM
+  local i; for i in 1 2 3 4 5 6; do kill -0 "$1" 2>/dev/null || break; sleep 1; done
+  killtree "$1" KILL; wait "$1" 2>/dev/null; true
 }
 
 wait_all() {  # pid... -> 0 only if every pid exited 0 (bash `wait a b` reports only b)

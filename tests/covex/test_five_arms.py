@@ -314,3 +314,10 @@ def test_bench_fails_loudly_when_server_down(tmp_path):
                        env=dict(os.environ, CLIENT_DIR=str(ROOT / "tests/covex/fake_client"), SOLO="1"),
                        capture_output=True, text=True, timeout=60)
     assert r.returncode != 0, "a down server must not look like a successful benchmark"
+
+
+def test_no_pkill_by_pattern_in_runners():
+    """pkill -f patterns killed the wrong process (the test shell itself); stops must go by PID tree."""
+    for f in (ROOT / "benchmarks").rglob("*.sh"):
+        code = "\n".join(l.split("#", 1)[0] for l in f.read_text().splitlines())
+        assert "pkill" not in code, f"{f.relative_to(ROOT)} uses pkill"

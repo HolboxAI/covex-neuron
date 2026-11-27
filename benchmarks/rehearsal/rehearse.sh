@@ -40,11 +40,10 @@ need() {  # wait <= 25 min for the real checkpoint download marker
   local m; case $1 in q32-*) m=Qwen3-32B;; vl-*) m=Qwen3-VL-32B-Instruct;; emb-*) m=Qwen3-Embedding-8B;; asr-*) m=Qwen3-ASR-1.7B;; esac
   for _ in $(seq 1 150); do [ -f "$HOME/models/$m/.done" ] && return 0; sleep 10; done; return 1; }
 killtree() { local c; for c in $(pgrep -P "$1" 2>/dev/null); do killtree "$c" "$2"; done; kill "-$2" "$1" 2>/dev/null; true; }
-stop() {  # port arm: kill the arm's process tree by PID, then anything still bound to the port
-  [ -n "${2:-}" ] && [ -n "${SPID[$2]:-}" ] && killtree "${SPID[$2]}" TERM
-  pkill -f -- "--port $1( |$)"; sleep 5
-  [ -n "${2:-}" ] && [ -n "${SPID[$2]:-}" ] && killtree "${SPID[$2]}" KILL
-  pkill -9 -f -- "--port $1( |$)"; true; }
+stop() {  # port arm: kill the arm's process tree by PID (no command-line patterns; they can match other processes)
+  [ -n "${2:-}" ] && [ -n "${SPID[$2]:-}" ] || return 0
+  killtree "${SPID[$2]}" TERM; local i; for i in 1 2 3 4 5 6; do kill -0 "${SPID[$2]}" 2>/dev/null || break; sleep 1; done
+  killtree "${SPID[$2]}" KILL; true; }
 
 # ---------------- Track A: CPU mode, small same-architecture checkpoints ----------------
 cpu_probe() {  # arm port
