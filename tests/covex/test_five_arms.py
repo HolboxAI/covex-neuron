@@ -90,13 +90,15 @@ def test_known_broken_arms_are_not_started():
     assert "emb-C" in broken  # remove only together with the packed-prefill recompile fix
 
 
-def test_payload_uses_supported_download_cli():
-    text = PAYLOAD.read_text()
+@pytest.mark.parametrize("payload", sorted((ROOT / "benchmarks").rglob("payload*.sh")), ids=lambda p: p.parent.name)
+def test_payload_uses_supported_download_cli(payload):
+    text = payload.read_text()
+    assert re.search(r"^shutdown -h \+\d+", text, re.M), "payload must hard-stop the instance"
     assert "huggingface-cli" not in text, "huggingface-cli is retired; use `hf download`"
     for line in re.findall(r"hf download[^\n]*", text):
         assert not re.search(r'--exclude "[^"]+" "[^"]+"', line), f"one pattern per --exclude: {line}"
-    for model in re.findall(r"hf download \S+ --local-dir ~/models/(\S+)", text):
-        assert f"~/models/{model}/config.json" in text or "for m in" in text, f"{model}: no post-download check"
+    for model in re.findall(r"hf download \S+ --local-dir ~/models[-a-z]*/(\S+)", text):
+        assert "config.json" in text, f"{model}: no post-download check"
 
 
 def test_changed_python_has_no_undefined_names():
@@ -119,3 +121,32 @@ def test_vllm_neuron_imports_in_cpu_mode():
     r = subprocess.run(["python3", "-c", "import vllm_neuron, vllm_neuron.functional"], cwd=ROOT, env=env,
                        capture_output=True, text=True)
     assert r.returncode == 0, r.stderr[-2000:]
+
+
+def test_shell_functions_defined_before_first_call():
+    """run.sh called llm() in the profile block before defining it (caught 2026-11-27, before any launch)."""
+    for script in (RUN, ROOT / "benchmarks/asr/run_all.sh"):
+        if not script.exists():
+            continue
+        lines = script.read_text().splitlines()
+        defs = {m.group(1): i for i, l in enumerate(lines) if (m := re.match(r"\s*([a-z_][a-z0-9_]*)\(\)\s*\{", l))}
+        for name, d in defs.items():
+            for i, l in enumerate(lines[:d]):
+                code = l.split("#", 1)[0]
+                if re.search(rf"(^|[;&|({{]\s*|\s){name}\s", code):
+                    pytest.fail(f"{script.name}:{i+1} calls {name}() before its definition at line {d+1}")
+
+
+def test_qwen3_inkernel_kv_write_passes_bound_cache_buffer():
+    """The in-kernel KV write must target self.k_cache/self.v_cache, not a squeeze view (NCC_EOOM002, q32-C 2026-11-27)."""
+    src = (ROOT / "vllm_neuron/model/qwen3/model.py").read_text()
+    call = src[src.index("update_cache=_INKERNEL_KV") - 3000: src.index("update_cache=_INKERNEL_KV")]
+    assert "K_cache=self.k_cache if _INKERNEL_KV" in call and "V_cache=self.v_cache if _INKERNEL_KV" in call
+
+
+def test_rehearsal_scripts_parse_and_cover_every_arm():
+    sh = (ROOT / "benchmarks/rehearsal/rehearse.sh").read_text()
+    subprocess.run(["bash", "-n", str(ROOT / "benchmarks/rehearsal/rehearse.sh")], check=True)
+    for arm in ["q32-T", "q32-C", "emb-T", "emb-C", "vl-T", "vl-C", "asr-T", "asr-C"]:
+        assert arm in sh, f"rehearsal does not cover {arm}"
+    assert "VLLM_NEURON_CPU_MODE=1" in sh and "VLLM_NEURON_CPU_COMPILE=1" in sh

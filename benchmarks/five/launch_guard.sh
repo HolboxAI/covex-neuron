@@ -8,7 +8,8 @@ python3 -m pytest tests/covex -q > /tmp/guard_tests.log 2>&1 && echo "ok   tests
 benchmarks/asr/preflight.sh > /tmp/guard_preflight.log 2>&1 && echo "ok   preflight" || { echo "FAIL preflight (see /tmp/guard_preflight.log)"; fail=1; }
 m=$(grep -oE 'shutdown -h \+[0-9]+' "$PAY" | head -1 | grep -oE '[0-9]+$')
 [ -n "$m" ] && [ "$m" -le "$CAP" ] && echo "ok   hard stop ${m} min (cap ${CAP})" || { echo "FAIL hard stop missing or > ${CAP} min"; fail=1; }
-cmp -s "$PAY" benchmarks/five/payload.sh && echo "ok   payload matches committed benchmarks/five/payload.sh" || { echo "FAIL payload differs from the committed one"; fail=1; }
+git ls-files --error-unmatch "$PAY" > /dev/null 2>&1 && git diff --quiet HEAD -- "$PAY" && [ -z "$(git status --porcelain)" ] && git fetch -q origin && [ "$(git rev-parse HEAD)" = "$(git rev-parse @{u})" ] \
+  && echo "ok   payload committed, tree clean, HEAD pushed" || { echo "FAIL payload not committed / tree dirty / HEAD not pushed"; fail=1; }
 running=$(for r in us-east-1 us-east-2 us-west-2 ap-northeast-1 ap-southeast-1; do aws ec2 describe-instances --region $r \
   --filters Name=instance-type,Values='trn*' Name=instance-state-name,Values=running,pending \
   --query 'Reservations[].Instances[].InstanceId' --output text 2>/dev/null; done | tr -s '\t\n ' ' ')

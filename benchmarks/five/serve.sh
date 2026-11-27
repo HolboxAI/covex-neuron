@@ -2,7 +2,9 @@
 # Start one arm. Usage: serve.sh <ARM> <PORT>   (ARM = <model>-<T|C>; T = tuned stock, C = COVEX flags)
 # Core ranges are fixed per arm so all arms share one trn2.48xlarge (16 chips = 64 logical cores at LNC2).
 set -euo pipefail
-ARM=$1; PORT=$2; M=$HOME/models
+ARM=$1; PORT=$2; M=${MODELS_DIR:-$HOME/models}; TAG=${LOG_TAG:-}
+# REHEARSAL_EXTRA: extra vllm args for the CPU-mode rehearsal only (never set on Trainium).
+read -r -a EXTRA <<< "${REHEARSAL_EXTRA:-}"
 export TORCH_DEVICE_BACKEND_AUTOLOAD=0 NEURON_LIBTORCH_COMPILATION_TIMEOUT=3600 NEURON_SKIP_EFA_AFFINITY=1
 export VLLM_NEURON_COMPILATION_TIMEOUT=3600 VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=1200
 mkdir -p logs
@@ -39,7 +41,8 @@ case "$ARM" in
           ); CFG='{"neuron_config":{"num_batched_tokens_buckets":[8192],"num_seqs_buckets":[4],"on_device_sampling_config":{"all_greedy":true}}}' ;;
   *) echo "unknown arm $ARM" >&2; exit 2 ;;
 esac
-export NEURON_VISIBLE_DEVICES=$CORES
+# CPU mode runs on host CPUs; core ranges apply on Trainium and in CPU compile (compile-cache prefix).
+[ "${VLLM_NEURON_CPU_MODE:-0}" = 1 ] || export NEURON_VISIBLE_DEVICES=$CORES
 PROF=()
 if [ "${PROFILE:-0}" = 1 ]; then   # vllm-neuron built-in profiler; records only between /start_profile and /stop_profile
   NCORES=$(( ${CORES#*-} - ${CORES%-*} + 1 ))
@@ -48,5 +51,5 @@ if [ "${PROFILE:-0}" = 1 ]; then   # vllm-neuron built-in profiler; records only
 fi
 python3 -c 'import json,sys; json.loads(sys.argv[1])' "$CFG" || { echo "bad CFG for $ARM" >&2; exit 2; }
 if [ "${DRYRUN:-0}" = 1 ]; then echo "$ARM cores=$CORES flags=$(env | grep -oE '^COVEX_[A-Z_]+' | sort | tr '\n' ' ')cfg=$CFG"; exit 0; fi
-{ echo "arm=$ARM cores=$CORES profile=${PROFILE:-0}"; env | grep -E '^(COVEX|VLLM_NEURON|NEURON_VISIBLE)' | sort; printf '%q ' "${ARGS[@]}"; echo; echo "$CFG"; } > "logs/$ARM.meta"
-exec vllm serve "${ARGS[@]}" --additional-config "$CFG" "${PROF[@]}" --port "$PORT" > "logs/$ARM.server.log" 2>&1
+{ echo "arm=$ARM cores=$CORES profile=${PROFILE:-0}"; env | grep -E '^(COVEX|VLLM_NEURON|NEURON_VISIBLE)' | sort; printf '%q ' "${ARGS[@]}"; echo; echo "$CFG"; } > "logs/$ARM$TAG.meta"
+exec vllm serve "${ARGS[@]}" "${EXTRA[@]}" --additional-config "$CFG" "${PROF[@]}" --port "$PORT" > "logs/$ARM$TAG.server.log" 2>&1

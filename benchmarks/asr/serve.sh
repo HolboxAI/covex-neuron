@@ -7,7 +7,8 @@ HERE=$(cd "$(dirname "$0")" && pwd); source "$HERE/arm_config.sh"
 MODEL_DIR=${MODEL_DIR:-$HOME/models/Qwen3-ASR-1.7B}
 arm_config "$ARM" > /dev/null; CFG=$(arm_config "$ARM")
 # vllm-neuron multiproc requires NEURON_VISIBLE_DEVICES (logical-core range "a-b"); NEURON_RT_VISIBLE_CORES is rejected.
-export NEURON_VISIBLE_DEVICES="$((PAIR * 8))-$((PAIR * 8 + ARM_TP - 1))"
+[ "${VLLM_NEURON_CPU_MODE:-0}" = 1 ] || export NEURON_VISIBLE_DEVICES="$((PAIR * 8))-$((PAIR * 8 + ARM_TP - 1))"
+read -r -a EXTRA <<< "${REHEARSAL_EXTRA:-}"
 export TORCH_DEVICE_BACKEND_AUTOLOAD=0 NEURON_LIBTORCH_COMPILATION_TIMEOUT=1800 NEURON_SKIP_EFA_AFFINITY=1
 PROF_ARGS=()
 if [ "${PROFILE:-0}" = 1 ]; then
@@ -17,7 +18,7 @@ if [ "${PROFILE:-0}" = 1 ]; then
   PROF_ARGS=(--profiler-config '{"profiler": "cuda"}')
 fi
 mkdir -p logs
-{ echo "arm=$ARM tp=$ARM_TP pair=$PAIR cores=$NEURON_VISIBLE_DEVICES commit=$(git -C "$HERE" rev-parse --short HEAD) profile=${PROFILE:-0}"
+{ echo "arm=$ARM tp=$ARM_TP pair=$PAIR cores=${NEURON_VISIBLE_DEVICES:-cpu} commit=$(git -C "$HERE" rev-parse --short HEAD) profile=${PROFILE:-0}"
   env | grep -E '^(VLLM_NEURON|COVEX|NEURON_RT|NEURON_VISIBLE)' | sort; echo "$CFG"; } > "logs/$ARM${LOG_TAG:-}.meta"
 # Equal, disjoint host CPUs per arm (8 arms x 24 vCPUs on the 192-vCPU host) so arms do not steal host time
 # from each other. SOLO=1 drops the pinning for the solo S2 re-run.
@@ -28,4 +29,4 @@ exec "${PIN[@]}" vllm serve "$MODEL_DIR" \
   --tensor-parallel-size "$ARM_TP" --max-model-len 1024 \
   --max-num-seqs 16 --max-num-batched-tokens 1024 \
   --limit-mm-per-prompt '{"audio": 1}' --no-enable-prefix-caching --mm-processor-cache-gb 0 \
-  --port "$PORT" "${PROF_ARGS[@]}" --additional-config "$CFG" > "logs/$ARM${LOG_TAG:-}.server.log" 2>&1
+  --port "$PORT" "${PROF_ARGS[@]}" "${EXTRA[@]}" --additional-config "$CFG" > "logs/$ARM${LOG_TAG:-}.server.log" 2>&1

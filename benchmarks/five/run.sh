@@ -31,6 +31,12 @@ for a in "${!PORT[@]}"; do
 done
 up() { [ -n "${UP[$1]:-}" ]; }
 
+llm() { # arm port tokenizer conc prompts tag
+  pin $1 vllm bench serve --backend vllm --base-url "http://127.0.0.1:$2" --model m --tokenizer "$3" \
+    --dataset-name random --random-input-len 1024 --random-output-len 256 --ignore-eos \
+    --max-concurrency "$4" --num-prompts "$5" --seed 1 --percentile-metrics ttft,tpot,itl,e2el --metric-percentiles 50,90 \
+    --save-result --result-dir results --result-filename "$1-$6.json" > "logs/$1-$6.bench.log" 2>&1 || echo "BENCH $1-$6 FAILED"
+}
 # --- correctness: COVEX must reproduce stock's greedy output ------------------------------------------
 for m in q32; do up $m-T && up $m-C && { pin $m-T python3 $C gen 8000 results/$m-T.gen.json & pin $m-C python3 $C gen 8001 results/$m-C.gen.json & wait; python3 $C match results/$m-T.gen.json results/$m-C.gen.json | tee results/$m.match.json; }; done
 
@@ -45,12 +51,6 @@ for a in asr-T asr-C; do up $a || continue
     && curl -sf -X POST "localhost:${PORT[$a]}/stop_profile" > /dev/null
 done
 # --- throughput, T and C of a model at the same time ----------------------------------------------------
-llm() { # arm port tokenizer conc prompts tag
-  pin $1 vllm bench serve --backend vllm --base-url "http://127.0.0.1:$2" --model m --tokenizer "$3" \
-    --dataset-name random --random-input-len 1024 --random-output-len 256 --ignore-eos \
-    --max-concurrency "$4" --num-prompts "$5" --seed 1 --percentile-metrics ttft,tpot,itl,e2el --metric-percentiles 50,90 \
-    --save-result --result-dir results --result-filename "$1-$6.json" > "logs/$1-$6.bench.log" 2>&1 || echo "BENCH $1-$6 FAILED"
-}
 (
   for c in 1 8; do for a in q32-T q32-C; do up $a && llm $a ${PORT[$a]} $HOME/models/Qwen3-32B $c $((c==1?8:32)) c$c & done; wait; done
 ) &

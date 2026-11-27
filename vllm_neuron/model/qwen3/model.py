@@ -560,8 +560,12 @@ class Qwen3Attention(nn.Module):
             rope_contiguous_layout=True,
             K_cache_transposed=False,
             active_blocks_table=active_blocks_table,
-            K_cache=k_cache,
-            V_cache=v_cache,
+            # In-kernel write: pass the bound 4D buffer itself (the kernel accepts the head
+            # axis), as Llama 3 does. A squeeze(1) view hides the in-place write from the
+            # FX aliasing pass, so the caches stop being mutated inputs and become separate
+            # I/O tensors: neuronx-cc NCC_EOOM002, 54 GB peak on Qwen3-32B TP8 (2026-11-27).
+            K_cache=self.k_cache if _INKERNEL_KV else k_cache,
+            V_cache=self.v_cache if _INKERNEL_KV else v_cache,
             attention_mask=attention_mask,
             softmax_scale=self.scaling / self.k_scale_float,
             sink=None,
