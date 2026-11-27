@@ -58,7 +58,9 @@ track_a() {
   # CPU decode runs ~1 tok/s: probes check that real requests complete, not speed (4 prompts x 8 tokens, 4 images, 4 clips).
   export VLLM_NEURON_CPU_MODE=1 REHEARSAL_EXTRA="--gpu-memory-utilization 0.2" PROBE_N=4 PROBE_TOKENS=8
   # REHEARSAL_PAIRS_A / _B (";"-separated) narrow the arms, e.g. for the CI harness test.
-  IFS=";" read -r -a PAIRS <<< "${REHEARSAL_PAIRS_A:-q32-T q32-C;emb-T emb-C;vl-T vl-C;asr-T asr-C}"
+  # No vl-* in CPU mode: vllm-neuron's torch fallback for block-KV attention rejects GQA with 2 KV heads/rank
+  # (Qwen3-VL at TP4; rehearsal 1). VL is covered by the compile track; its runtime only on Trainium.
+  IFS=";" read -r -a PAIRS <<< "${REHEARSAL_PAIRS_A:-q32-T q32-C;emb-T emb-C;asr-T asr-C}"
   for pair in "${PAIRS[@]}"; do
     i=0; for a in $pair; do serve cpu $a 100 $HOME/models-small "$(cpuset $((i*8)) $((i*8+7)))" & SPID[$a]=$!; i=$((i+1)); done
     for a in $pair; do p=$(( $(port $a) + 100 )); L=$(log_of $a cpu)

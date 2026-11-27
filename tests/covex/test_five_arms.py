@@ -148,7 +148,7 @@ def test_rehearsal_scripts_parse_and_cover_every_arm():
     sh = (ROOT / "benchmarks/rehearsal/rehearse.sh").read_text()
     subprocess.run(["bash", "-n", str(ROOT / "benchmarks/rehearsal/rehearse.sh")], check=True)
     for arm in ["q32-T", "q32-C", "emb-T", "emb-C", "vl-T", "vl-C", "asr-T", "asr-C"]:
-        assert arm in sh, f"rehearsal does not cover {arm}"
+        assert arm in sh, f"rehearsal does not cover {arm}"   # vl-* in the compile track only (CPU-mode GQA limit)
     assert "VLLM_NEURON_CPU_MODE=1" in sh and "VLLM_NEURON_CPU_COMPILE=1" in sh
 
 
