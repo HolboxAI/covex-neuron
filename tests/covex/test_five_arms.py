@@ -1674,3 +1674,11 @@ def test_emb_payload_renders_with_pins_and_cap(tmp_path):
     assert 'EMB_ARMS="emb-U emb-T emb-P4 emb-P8" EMB_LENS=t64' in t and "EMB_READY_DEADLINE=$READY_AT" in t
     m = re.search(r"^shutdown -h \+(\d+)", t, re.M)
     assert m and int(m.group(1)) * 8.60 / 60 <= 7.0
+
+
+def test_emb_p1x_forces_packed_attention_with_one_prefill():
+    r = subprocess.run(["bash", str(ROOT / "benchmarks/five/serve.sh"), "emb-P1x", "8200"], capture_output=True, text=True,
+                       env=dict(os.environ, DRYRUN="1"))
+    assert r.returncode == 0 and "flags=COVEX_FORCE_PACKED_ATTENTION" in r.stdout and "max_prefills_per_batch" not in r.stdout
+    src = (ROOT / "vllm_neuron/vllm/worker/neuron_model_runner.py").read_text()
+    assert src.count('> 1 or envs.COVEX_FORCE_PACKED_ATTENTION,') == 2       # runtime and warmup metadata agree

@@ -54,6 +54,7 @@ if TYPE_CHECKING:
     COVEX_DECODE_DYNAMIC_FA: bool = False
     # COVEX: Qwen3 decode (nkh == 1 path, BF16 KV) writes new K/V inside the attention kernel instead of index_put_.
     COVEX_QWEN3_INKERNEL_KV_WRITE: bool = False
+    COVEX_FORCE_PACKED_ATTENTION: bool = False
     # COVEX: fold Qwen3-ASR encoder norm2 (LayerNorm) into the audio MLP NKI kernel. Off by default.
     COVEX_ASR_ENCODER_LN_IN_MLP: bool = False
     VLLM_NEURON_RESERVED_HEADROOM_GIB: float | None = None
@@ -346,6 +347,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     "COVEX_QWEN3_INKERNEL_KV_WRITE": lambda: (
         maybe_convert_bool(os.getenv("COVEX_QWEN3_INKERNEL_KV_WRITE")) or False
+    ),
+    # Diagnostic: route prefill attention through the packed-prefill path (per-request bounds) even with one prefill
+    # per step, to separate the packed kernel's numerics from the effect of sharing a step with other requests.
+    "COVEX_FORCE_PACKED_ATTENTION": lambda: (
+        maybe_convert_bool(os.getenv("COVEX_FORCE_PACKED_ATTENTION")) or False
     ),
     "COVEX_VL_VISION_MLP_NKI": lambda: (
         maybe_convert_bool(os.getenv("COVEX_VL_VISION_MLP_NKI")) or False

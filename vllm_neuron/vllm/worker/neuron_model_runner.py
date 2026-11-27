@@ -5696,7 +5696,7 @@ class NeuronModelRunner(KVConnectorModelRunnerMixin, NeuronECConnectorModelRunne
                 "slot_mapping": slot_mapping,
                 "max_query_len": max_query_len,
                 # packed prefill: per-request attention bounds in the model (static per server, never a stock change)
-                "packed_prefill": getattr(self, "max_prefills_per_batch", 1) > 1,
+                "packed_prefill": getattr(self, "max_prefills_per_batch", 1) > 1 or envs.COVEX_FORCE_PACKED_ATTENTION,
                 "block_size": block_size,
                 "max_blocks_per_seq": blk_table_tensor.shape[1],
                 "decode_token_threshold": decode_token_threshold,
@@ -5889,7 +5889,7 @@ class NeuronModelRunner(KVConnectorModelRunnerMixin, NeuronECConnectorModelRunne
                 "slot_mapping": slot_mapping,
                 "max_query_len": max_query_len,
                 # packed prefill: per-request attention bounds in the model (static per server, never a stock change)
-                "packed_prefill": getattr(self, "max_prefills_per_batch", 1) > 1,
+                "packed_prefill": getattr(self, "max_prefills_per_batch", 1) > 1 or envs.COVEX_FORCE_PACKED_ATTENTION,
                 "block_size": block_size,
                 "max_blocks_per_seq": max_num_blocks_per_req,
                 "decode_token_threshold": decode_token_threshold,

@@ -10,7 +10,9 @@ row per requested arm; a malformed record fails the arm it names (or every arm, 
 import glob, json, os, re, sys
 
 EXPECTED_FLAGS = {"q32-U": set(), "q32-T": set(), "q32-K": {"COVEX_QWEN3_INKERNEL_KV_WRITE"},
-                  "q32-F": {"COVEX_DECODE_DYNAMIC_FA"}, "q32-C": {"COVEX_QWEN3_INKERNEL_KV_WRITE", "COVEX_DECODE_DYNAMIC_FA"}}
+                  "q32-F": {"COVEX_DECODE_DYNAMIC_FA"}, "q32-C": {"COVEX_QWEN3_INKERNEL_KV_WRITE", "COVEX_DECODE_DYNAMIC_FA"},
+                  "q32-Ut": set(), "emb-U": set(), "emb-T": set(), "emb-P4": set(), "emb-P8": set(), "emb-P16": set(),
+                  "emb-P1x": {"COVEX_FORCE_PACKED_ATTENTION"}}
 
 
 CACHE_KEYS = ("NEURON_LIBTORCH_CACHE_ROOT", "VLLM_CACHE_ROOT", "TORCH_NEURONX_NEFF_CACHE_DIR")
