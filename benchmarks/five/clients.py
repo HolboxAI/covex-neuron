@@ -3,6 +3,7 @@
   emb   <port> <texts.jsonl> <n> <conc> <out.json>   embeddings throughput (+ first 20 vectors for the T/C match)
   vl    <port> <vl_dir> <n> <conc> <out.json>        image chat throughput (+ first 20 answers)
   gen   <port> <out.json>                            20 fixed greedy prompts, 64 tokens (T/C output match)
+  smoke <gen|emb|vl|asr> <port> [model] [data]   one real request; non-zero exit unless usable (readiness gate)
   match <T.json> <C.json>                            compare saved outputs: exact-text match rate, or embedding cosine
 """
 import asyncio, base64, json, os, statistics, sys, time
@@ -72,7 +73,35 @@ def match(a, b):
         same = sum(x == y for x, y in zip(A["answers"], B["answers"]))
         print(json.dumps({"exact_match": f"{same}/{len(A['answers'])}", "pass": same == len(A["answers"])}))
 
+def smoke(kind, port, model="m", data=""):
+    """One small real request; exits non-zero unless it returns a usable result. The readiness gate after /health."""
+    import glob
+    base = f"http://127.0.0.1:{port}"
+    with httpx.Client(timeout=600) as c:
+        if kind == "gen":
+            r = c.post(f"{base}/v1/completions", json={"model": model, "prompt": "The capital of France is", "max_tokens": 4, "temperature": 0})
+            ok = r.status_code == 200 and isinstance(r.json()["choices"][0]["text"], str)
+        elif kind == "emb":
+            r = c.post(f"{base}/v1/embeddings", json={"model": model, "input": ["readiness check"]})
+            ok = r.status_code == 200 and len(r.json()["data"][0]["embedding"]) > 0
+        elif kind == "vl":
+            man = json.load(open(os.path.join(data, "manifest.json")))
+            img = base64.b64encode(open(os.path.join(data, "images", man[0]["image"]), "rb").read()).decode()
+            content = [{"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{img}"}}, {"type": "text", "text": "Describe briefly."}]
+            r = c.post(f"{base}/v1/chat/completions", json={"model": model, "messages": [{"role": "user", "content": content}], "max_tokens": 4, "temperature": 0})
+            ok = r.status_code == 200 and r.json()["choices"][0]["message"] is not None
+        elif kind == "asr":
+            wav = sorted(glob.glob(os.path.join(data, "**", "*.wav"), recursive=True))[0]
+            r = c.post(f"{base}/v1/audio/transcriptions", data={"model": model}, files={"file": (os.path.basename(wav), open(wav, "rb"), "audio/wav")})
+            ok = r.status_code == 200 and isinstance(r.json().get("text"), str)
+        else:
+            raise SystemExit(f"unknown smoke kind {kind}")
+    if not ok:
+        raise SystemExit(f"smoke {kind} failed: HTTP {r.status_code} {r.text[:200]}")
+    print(f"smoke {kind} ok")
+
+
 if __name__ == "__main__":
     cmd, *a = sys.argv[1:]
     {"emb": lambda: emb(a[0], a[1], int(a[2]), int(a[3]), a[4]), "vl": lambda: vl(a[0], a[1], int(a[2]), int(a[3]), a[4]),
-     "gen": lambda: gen(a[0], a[1]), "match": lambda: match(a[0], a[1])}[cmd]()
+     "gen": lambda: gen(a[0], a[1]), "match": lambda: match(a[0], a[1]), "smoke": lambda: smoke(*a)}[cmd]()

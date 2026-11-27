@@ -1,11 +1,16 @@
 #!/usr/bin/env bash
-# Fake `vllm serve` for the rehearsal harness test. Sleeps before opening its port (the start-up gap that made the
-# 2026-11-27 rehearsal kill starting servers), prints the compile evidence rehearse.sh looks for, then serves.
+# Fake `vllm serve` for harness tests. Starts late (the gap that made rehearsal 1 kill starting servers), prints the
+# compile evidence rehearse.sh checks (6 lanes, 1 + 2*FAKE_LAYERS mutated inputs; ports in FAKE_ALIAS_BUG_PORTS get
+# the squeeze-view bug: decode lanes 2-5 with only [1]), then serves.
 port=""; while [ $# -gt 0 ]; do [ "$1" = --port ] && port=$2; shift; done
 echo "INFO fake vllm serve on port $port (cpu_mode=${VLLM_NEURON_CPU_MODE:-0})"
 sleep "${FAKE_VLLM_DELAY:-3}"
 if [ "${VLLM_NEURON_CPU_COMPILE:-0}" = 1 ]; then
   echo "INFO - neuron_worker.py:2199 - Extracting graphs for 2 prefill buckets: [(1024, 8192), (8192, 8192)]"
-  for l in 2 3 4 5; do echo "INFO - aliasing_analysis.py:745 - [trace lane=$l rank=0] Mutated inputs: [1, 13, 14, 25, 26], Explicit outputs: 1"; done
+  full=$(python3 -c "print(', '.join(['1'] + [str(13 + i) for i in range(2 * ${FAKE_LAYERS:-2})]))")
+  for l in 0 1 2 3 4 5; do
+    m=$full; [[ " ${FAKE_ALIAS_BUG_PORTS:-} " == *" $port "* ]] && [ $l -ge 2 ] && m=1
+    echo "INFO - aliasing_analysis.py:745 - [trace lane=$l rank=0] Mutated inputs: [$m], Explicit outputs: 1"
+  done
 fi
 exec python3 "$(dirname "$0")/../fake_server.py" --port "$port"   # real vllm carries --port too

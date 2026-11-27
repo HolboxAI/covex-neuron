@@ -171,23 +171,7 @@ def test_no_bare_wait_outside_subshells():
                     pytest.fail(f"{script.name}:{i}: bare `wait` at top level; wait on client PIDs instead")
 
 
-def test_bench_snapshots_after_prewarm_and_per_level():
-    text = (ROOT / "benchmarks/asr/bench.sh").read_text()
-    assert text.index("prewarm") < text.index(".before.prom"), "warm the server before the first metrics snapshot"
-    assert "metrics/$ARM.c$c.$ph.before.prom" in text, "snapshot each concurrency/phase separately"
 
-
-def test_liveness_uses_pid_not_pgrep_port():
-    """pgrep -f '--port N' misses a server until serve.sh execs vllm; the 2026-11-27 rehearsal killed starting servers."""
-    for script in [RUN, ROOT / "benchmarks/rehearsal/rehearse.sh"]:
-        code = "\n".join(l.split("#", 1)[0] for l in script.read_text().splitlines())
-        assert not re.search(r"pgrep -f -- \"--port", code), f"{script.name}: liveness via pgrep --port"
-        assert "kill -0" in code, f"{script.name}: no PID liveness check"
-
-
-def test_rehearsal_compile_pass_needs_positive_evidence():
-    sh = (ROOT / "benchmarks/rehearsal/rehearse.sh").read_text()
-    assert sh.index("Extracting graphs for") < sh.index('record $a compile PASS'), "compile PASS must require graph extraction in the log"
 
 
 def test_encoder_mlp_ports_are_kernel_eligible():
@@ -220,9 +204,11 @@ def test_rehearsal_harness_end_to_end_with_fake_vllm(tmp_path):
     for d in ["models/Qwen3-32B", "models-small/Qwen3-32B"]:
         (home / d).mkdir(parents=True)
     (home / "models/Qwen3-32B/.done").touch()
+    (home / "models/Qwen3-32B/config.json").write_text('{"num_hidden_layers": 2}')
     run = tmp_path / "run"; run.mkdir()
     env = {"HOME": str(home), "PATH": f"{ROOT/'tests/covex/fake_bin'}:{os.environ['PATH']}",
-           "REHEARSAL_PAIRS_A": "q32-T q32-C", "REHEARSAL_PAIRS_B": "q32-C q32-T"}
+           "REHEARSAL_PAIRS_A": "q32-T q32-C", "REHEARSAL_PAIRS_B": "q32-C q32-T",
+           "FAKE_LAYERS": "2", "FAKE_ALIAS_BUG_PORTS": "8201"}   # 8201 = q32-C compile: must be caught
     r = subprocess.run(["bash", str(ROOT / "benchmarks/rehearsal/rehearse.sh")], cwd=run, env=env,
                        capture_output=True, text=True, timeout=600)
     tsv = (run / "REHEARSAL.tsv").read_text()
@@ -232,6 +218,99 @@ def test_rehearsal_harness_end_to_end_with_fake_vllm(tmp_path):
               ("q32-C", "compile-alias"), ("q32-T", "compile-alias")}
     assert expect <= rows.keys(), f"missing rows: {expect - rows.keys()}\n{tsv}\n{r.stdout[-2000:]}\n{r.stderr[-2000:]}"
     bad = {k: v for k, v in rows.items() if v != "PASS"}
-    assert not bad, f"harness reported failures against a healthy fake server: {bad}\n{tsv}\n{logs}"
+    assert bad == {("q32-C", "compile-alias"): "FAIL"}, f"expected only the injected alias bug to fail, got {bad}\n{tsv}\n{logs}"
     assert (run / "REHEARSAL.md").exists()
     assert subprocess.run(["pgrep", "-f", "fake_server.py"], capture_output=True).returncode != 0, "servers left running"
+
+
+# ---------------- behaviour tests (run real code against fakes; Linux CI) ----------------
+LINUX = __import__("sys").platform == "linux" and shutil.which("taskset") is not None
+FAKE = ROOT / "tests/covex/fake_server.py"
+
+
+def _bash(script, env=None, timeout=120):
+    e = dict(os.environ, **(env or {}))
+    return subprocess.run(["bash", "-c", f"source {ROOT/'benchmarks/lib.sh'}\n{script}"], env=e, capture_output=True,
+                          text=True, timeout=timeout)
+
+
+def test_alias_check_on_real_logs():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("ac", ROOT / "benchmarks/rehearsal/alias_check.py")
+    ac = importlib.util.module_from_spec(spec); spec.loader.exec_module(ac)
+    fx = ROOT / "tests/covex/fixtures"
+    ok, _ = ac.check((fx / "alias_stock_ok.log").read_text(), 64, 6)
+    assert ok, "stock Qwen3-32B compile log (129 mutated inputs in all 6 lanes) must pass"
+    ok, detail = ac.check((fx / "alias_inkernel_squeeze_bug.log").read_text(), 64, 6)
+    assert not ok and "{2: 1, 3: 1, 4: 1, 5: 1}" in detail, detail
+    ok, detail = ac.check("\n".join((fx / "alias_stock_ok.log").read_text().splitlines()[:5]), 64, 6)
+    assert not ok and "missing lanes" in detail, "a missing graph lane must fail"
+
+
+@pytest.mark.skipif(not LINUX, reason="Linux CI")
+def test_lib_readiness_requires_real_inference(tmp_path):
+    r = _bash(f"""
+      python3 {FAKE} --port 8911 & p1=$!; FAKE_FAIL_INFER=1 python3 {FAKE} --port 8912 & p2=$!
+      (sleep 4; exec python3 {FAKE} --port 8913) & p3=$!      # starts late
+      why=$(wait_ready $p1 8911 60 gen); echo "healthy=$?"
+      why=$(wait_ready $p2 8912 60 gen); echo "health_only=$? $why"
+      why=$(wait_ready $p3 8913 60 gen); echo "late=$?"
+      (exit 1) & d=$!; why=$(wait_ready $d 8914 30 gen); echo "dead=$?"
+      stop_arm $p1 8911; stop_arm $p2 8912; stop_arm $p3 8913""")
+    out = r.stdout
+    assert "healthy=0" in out and "late=0" in out, out + r.stderr
+    assert "health_only=3" in out and "smoke request failed" in out, "health without working inference must not be READY\n" + out
+    assert "dead=1" in out, out
+
+
+@pytest.mark.skipif(not LINUX, reason="Linux CI")
+def test_lib_stop_arm_is_targeted_and_wait_all_sees_every_failure():
+    r = _bash(f"""
+      python3 {FAKE} --port 8921 & a=$!; python3 {FAKE} --port 8922 & b=$!
+      wait_health $a 8921 30; wait_health $b 8922 30
+      stop_arm $a 8921
+      curl -sf localhost:8921/health >/dev/null && echo a_alive || echo a_stopped
+      curl -sf localhost:8922/health >/dev/null && echo b_alive || echo b_stopped
+      stop_arm $b 8922
+      (exit 1) & f=$!; (sleep 1; exit 0) & g=$!; wait_all $f $g; echo "wait_all=$?"
+      (exit 0) & f=$!; (exit 0) & g=$!; wait_all $f $g; echo "wait_all_ok=$?" """)
+    out = r.stdout
+    assert "a_stopped" in out and "b_alive" in out, "stop_arm must stop only its own arm\n" + out + r.stderr
+    assert "wait_all=1" in out and "wait_all_ok=0" in out, out
+
+
+@pytest.mark.skipif(not LINUX, reason="Linux CI")
+def test_bench_prewarms_each_level_before_its_snapshot(tmp_path):
+    ev = tmp_path / "events"; work = tmp_path / "w"; work.mkdir()
+    srv = subprocess.Popen(["python3", str(FAKE), "--port", "8931"], env=dict(os.environ, FAKE_EVENTS=str(ev)))
+    try:
+        for _ in range(50):
+            if subprocess.run(["curl", "-sf", "localhost:8931/health"], capture_output=True).returncode == 0:
+                break
+            __import__("time").sleep(0.2)
+        env = dict(os.environ, FAKE_EVENTS=str(ev), CLIENT_DIR=str(ROOT / "tests/covex/fake_client"), SOLO="1", ROUNDS="1")
+        r = subprocess.run(["bash", str(ROOT / "benchmarks/asr/bench.sh"), "X", "8931", "4", "1,8"], cwd=work, env=env,
+                           capture_output=True, text=True, timeout=120)
+        assert r.returncode == 0, r.stdout + r.stderr
+    finally:
+        srv.terminate()
+    lines = [l for l in ev.read_text().splitlines() if not l.startswith("POST")]
+    assert lines[0].startswith("CLIENT") and "prewarm" in lines[0], "global prewarm must precede the first snapshot\n" + "\n".join(lines)
+    for c in (1, 8):
+        for ph in ("transcribe", "chat_stream"):
+            seq = [i for i, l in enumerate(lines) if f"c={c} ph={ph} " in l]
+            pre = [i for i in seq if f"X.c{c}.{ph}.prewarm" in lines[i]]
+            meas = [i for i in seq if f"out=X.c{c}.{ph}.json" in lines[i]]
+            assert pre and meas, f"c{c} {ph}: missing prewarm or measured call\n" + "\n".join(lines)
+            p, m = pre[0], meas[0]
+            assert p < m and lines[p + 1] == "METRICS" and lines[m + 1] == "METRICS" and m == p + 2, \
+                f"c{c} {ph}: order must be prewarm, METRICS(before), measured, METRICS(after)\n" + "\n".join(lines)
+    assert (work / "results/X.json").exists()
+
+
+@pytest.mark.skipif(not LINUX, reason="Linux CI")
+def test_bench_fails_loudly_when_server_down(tmp_path):
+    r = subprocess.run(["bash", str(ROOT / "benchmarks/asr/bench.sh"), "X", "8939", "4", "1"], cwd=tmp_path,
+                       env=dict(os.environ, CLIENT_DIR=str(ROOT / "tests/covex/fake_client"), SOLO="1"),
+                       capture_output=True, text=True, timeout=60)
+    assert r.returncode != 0, "a down server must not look like a successful benchmark"

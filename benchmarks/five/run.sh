@@ -5,7 +5,8 @@
 set -uo pipefail
 H=$(cd "$(dirname "$0")" && pwd); A=$H/../asr; C=$H/clients.py; D=$HOME/data/sixdata
 export CLIENT_DIR=$HOME/qwen3-asr-inference-cuda-trainium
-mkdir -p results logs profiles
+source "$H/../lib.sh"
+fresh_dir results; fresh_dir profiles; mkdir -p logs   # never summarize files left by an earlier attempt
 declare -A PORT=([q32-T]=8000 [q32-C]=8001 [asr-T]=8002 [asr-C]=8003 [emb-T]=8004 [emb-C]=8005 [vl-T]=8006 [vl-C]=8007 [oss-T]=8008)
 declare -A CPU; i=0; for a in q32-T q32-C asr-T asr-C emb-T emb-C vl-T vl-C oss-T; do CPU[$a]="$((i*20))-$((i*20+19))"; i=$((i+1)); done
 pin() { taskset -c "${CPU[$1]}" "${@:2}"; }
@@ -23,13 +24,14 @@ declare -A SPID
 # Servers never exit on their own: never `wait` on them. Every wait below names client PIDs (bare wait hung run 2).
 for a in "${!PORT[@]}"; do [[ "$BROKEN_ARMS" == *" $a "* ]] && { echo "ARM $a SKIPPED (known broken)"; continue; }; start "$a" & SPID[$a]=$!; done
 declare -A UP
+smoke_args() {  # arm -> kind model data for the readiness request
+  case $1 in emb-*) echo "emb m";; vl-*) echo "vl m $D/vl";; asr-*) echo "asr qwen3-asr-1.7b $CLIENT_DIR/data";; *) echo "gen m";; esac; }
 for a in "${!PORT[@]}"; do
-  for _ in $(seq 1 360); do  # <= 60 min per arm (compile); stops early if the server died
-    curl -sf "localhost:${PORT[$a]}/health" > /dev/null && { UP[$a]=1; break; }
-    kill -0 "${SPID[$a]:-0}" 2> /dev/null || break   # serve PID; pgrep "--port" misses a server that has not exec'd yet
-    sleep 10
-  done
-  echo "ARM $a $([ -n "${UP[$a]:-}" ] && echo UP || echo FAILED)"
+  [ -n "${SPID[$a]:-}" ] || continue
+  # READY = /health AND one real request succeeds (<= 60 min for compile). /health alone passed for Qwen3-32B
+  # stock, which then failed allocating at its first decode.
+  why=$(wait_ready "${SPID[$a]}" "${PORT[$a]}" 3600 $(smoke_args $a)) && UP[$a]=1
+  echo "ARM $a $([ -n "${UP[$a]:-}" ] && echo UP || echo "FAILED: $why")"
 done
 up() { [ -n "${UP[$1]:-}" ]; }
 
@@ -40,8 +42,13 @@ llm() { # arm port tokenizer conc prompts tag
     --save-result --result-dir results --result-filename "$1-$6.json" > "logs/$1-$6.bench.log" 2>&1 || echo "BENCH $1-$6 FAILED"
 }
 # --- correctness: COVEX must reproduce stock's greedy output ------------------------------------------
-for m in q32; do up $m-T && up $m-C && { pin $m-T python3 $C gen 8000 results/$m-T.gen.json & g1=$!; pin $m-C python3 $C gen 8001 results/$m-C.gen.json & g2=$!
-  wait $g1 $g2; python3 $C match results/$m-T.gen.json results/$m-C.gen.json | tee results/$m.match.json; }; done
+for m in q32; do up $m-T && up $m-C || continue
+  rm -f results/$m-T.gen.json results/$m-C.gen.json
+  pin $m-T python3 $C gen 8000 results/$m-T.gen.json & g1=$!; pin $m-C python3 $C gen 8001 results/$m-C.gen.json & g2=$!
+  if wait_all $g1 $g2 && [ -s results/$m-T.gen.json ] && [ -s results/$m-C.gen.json ]; then
+    python3 $C match results/$m-T.gen.json results/$m-C.gen.json | tee results/$m.match.json
+  else echo "CORRECTNESS $m FAILED (a client failed; no comparison)" | tee results/$m.match.json; fi
+done
 
 # --- stage + kernel profiles FIRST (Qwen3-32B and ASR; T and C): the step-level data must not depend on time left -------------------------------------------
 for a in q32-T q32-C; do up $a || continue
@@ -76,8 +83,8 @@ CL3=$!
   for a in asr-T asr-C; do up $a && SOLO=1 ROUNDS=1 pin $a "$A/bench.sh" $a ${PORT[$a]} 100 1,8 & done; wait
 ) &
 CL4=$!
-wait $CL0 $CL1 $CL2 $CL3 $CL4
+wait_all $CL0 $CL1 $CL2 $CL3 $CL4 || echo "WORKLOAD FAILURES (see logs/*.bench.log)"
 
-pkill -f "vllm serve"; sleep 20
+for a in "${!SPID[@]}"; do stop_arm "${SPID[$a]}" "${PORT[$a]}"; done   # only our arms
 for d in profiles/*/; do neuron-explorer view -d "$d" --output-format perfetto > /dev/null 2>&1 && python3 "$A/summarize_profile.py" "$d" > "$d/STAGES.md" 2>&1; done
 python3 "$H/summarize.py" results > RESULTS.md; cat RESULTS.md

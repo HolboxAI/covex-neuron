@@ -93,9 +93,11 @@ track_b() {
       elif [ $rc = 0 ] && [ -z "$bad" ]; then record $a compile PASS "compiled, server up"
       elif [ $rc = 1 ] && [ -z "$bad" ] && ! grep -qE "Traceback|Error:" "$L"; then record $a compile PASS "compiled, exited clean"
       else record $a compile FAIL "${bad:-$( [ $rc = 2 ] && echo 'not done in 30 min: ' )$(first_err $L)}"; fi
-      # decode graphs must keep the KV caches as in-place (mutated) inputs; [1] alone = the q32-C aliasing bug
-      if [[ $a == q32-* ]]; then n=$(grep -E "Mutated inputs: \[1\], " "$L" | wc -l); m=$(grep -cE "Mutated inputs: \[1, " "$L")
-        record $a compile-alias "$([ "$n" = 0 ] && [ "$m" -gt 0 ] && echo PASS || echo FAIL)" "lanes with KV-cache aliasing=$m, without=$n"; fi
+      # every graph must alias every layer's K/V cache (count checked per lane against num_hidden_layers);
+      # 6 lanes = 2 prefill + 4 decode buckets in serve.sh. The squeeze-view bug left decode lanes with 1.
+      if [[ $a == q32-* ]]; then
+        res=$(python3 "$H/rehearsal/alias_check.py" "$L" "$HOME/models/Qwen3-32B/config.json" 6 2>&1); res=${res:-"FAIL	alias_check produced no output"}
+        [[ $res == PASS* ]] && st=PASS || st=FAIL; record $a compile-alias $st "${res#*	}"; fi
       stop $p $a
     done
   done

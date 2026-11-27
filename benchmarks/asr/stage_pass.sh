@@ -5,15 +5,21 @@
 set -euo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd); CLIENT_DIR=${CLIENT_DIR:-$HOME/qwen3-asr-inference-cuda-trainium}
 declare -A PORT=([S2]=8001 [D]=8002) PAIR=([S2]=1 [D]=2)
-wait_up() { for _ in $(seq 1 360); do curl -sf "http://127.0.0.1:$1/health" > /dev/null && return 0; sleep 10; done; return 1; }
+source "$HERE/../lib.sh"
+declare -A SPID
+up_all() {  # tag [env...]: start S2 and D, READY = /health + one real transcription; abort the pass if not ready
+  local tag=$1 a why; shift
+  for a in S2 D; do env LOG_TAG=-$tag "$@" "$HERE/serve.sh" "$a" "${PAIR[$a]}" "${PORT[$a]}" & SPID[$a]=$!; done
+  for a in S2 D; do why=$(wait_ready "${SPID[$a]}" "${PORT[$a]}" 3600 asr qwen3-asr-1.7b "$CLIENT_DIR/data") \
+    || { echo "stage pass: $a not ready ($why)" >&2; stop_both; exit 3; }; done; }
+stop_both() { local a; for a in S2 D; do [ -n "${SPID[$a]:-}" ] && stop_arm "${SPID[$a]}" "${PORT[$a]}"; done; }   # only our arms
 load() { # arm conc tag
   python3 "$CLIENT_DIR/benchmark/benchmark.py" --base-url "http://127.0.0.1:${PORT[$1]}" --model qwen3-asr-1.7b \
     --data-dir "$CLIENT_DIR/data" --num-samples 50 --concurrency "$2" --rounds 1 --warmup 3 \
     --phases transcribe --label "stage-$1-c$2" --output "stages/$1-c$2-$3.json" > /dev/null; }
 mkdir -p stages profiles
 # (a) request side + host flame graphs
-for a in S2 D; do LOG_TAG=-stage "$HERE/serve.sh" "$a" "${PAIR[$a]}" "${PORT[$a]}" & done
-for a in S2 D; do wait_up "${PORT[$a]}"; done
+up_all stage
 for a in S2 D; do for c in 1 8; do
   load "$a" "$c" warm
   curl -sf "http://127.0.0.1:${PORT[$a]}/metrics" > "stages/$a-c$c.before.prom"
@@ -25,10 +31,9 @@ for a in S2 D; do for c in 1 8; do
   curl -sf "http://127.0.0.1:${PORT[$a]}/metrics" > "stages/$a-c$c.after.prom"
   [ -n "${SPY:-}" ] && wait "$SPY" || true; unset SPY
 done; done
-pkill -f "vllm serve" || true; sleep 15
+stop_both
 # (b) device timelines
-for a in S2 D; do LOG_TAG=-prof PROFILE=1 "$HERE/serve.sh" "$a" "${PAIR[$a]}" "${PORT[$a]}" & done
-for a in S2 D; do wait_up "${PORT[$a]}"; done
+up_all prof PROFILE=1
 for a in S2 D; do for c in 1 8; do
   load "$a" "$c" pwarm
   curl -sf -X POST "http://127.0.0.1:${PORT[$a]}/start_profile" > /dev/null
@@ -38,7 +43,7 @@ for a in S2 D; do for c in 1 8; do
   neuron-explorer view -d "profiles/$a-c$c" --output-format perfetto
   python3 "$HERE/summarize_profile.py" "profiles/$a-c$c" > "profiles/$a-c$c/STAGES.md" || true
 done; done
-pkill -f "vllm serve" || true; sleep 15
+stop_both
 # tables
 for a in S2 D; do { echo "# $a"; for c in 1 8; do
   python3 "$HERE/stage_table.py" "stages/$a-c$c.before.prom" "stages/$a-c$c.after.prom" "stages/$a-c$c-run.json" "$c" "profiles/$a-c$c/STAGES.md"; echo; done; } > "stages/$a.md"; done
