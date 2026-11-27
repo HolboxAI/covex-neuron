@@ -198,4 +198,9 @@ class H(http.server.BaseHTTPRequestHandler):
                                                        "total_tokens": pt + ct}})
 
 
-http.server.ThreadingHTTPServer(("127.0.0.1", PORT), H).serve_forever()
+class _Srv(http.server.ThreadingHTTPServer):
+    request_queue_size = 2048   # like uvicorn's backlog: c32 bursts must queue, not be reset (listen(5) dropped them)
+    daemon_threads = True
+
+
+_Srv(("127.0.0.1", PORT), H).serve_forever()

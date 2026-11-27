@@ -313,3 +313,28 @@ def test_long_prompt_probe_rejects_truncated_prompt_and_null_ids(tmp_path):
             assert (r.returncode != 0) == bool(want), (m, r.stdout, r.stderr)
     finally:
         srv.shutdown()
+
+
+def test_fake_server_accepts_a_c32_burst():
+    """The fake's listen backlog was 5: 32 concurrent embedding requests got connection resets on Linux."""
+    import os, socket, subprocess, sys, time, json, concurrent.futures as cf, urllib.request
+    from pathlib import Path
+    root = Path(__file__).resolve().parents[2]
+    s = socket.socket(); s.bind(("127.0.0.1", 0)); port = s.getsockname()[1]; s.close()
+    p = subprocess.Popen([sys.executable, str(root / "tests/covex/fake_server.py"), "--port", str(port)],
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=dict(os.environ))
+    try:
+        for _ in range(50):
+            try:
+                urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=1); break
+            except Exception:
+                time.sleep(0.1)
+        def one(i):
+            req = urllib.request.Request(f"http://127.0.0.1:{port}/v1/embeddings", json.dumps({"model": "m", "input": f"x {i}"}).encode(),
+                                         {"Content-Type": "application/json"})
+            return json.load(urllib.request.urlopen(req, timeout=30))["data"][0]["embedding"]
+        with cf.ThreadPoolExecutor(64) as ex:
+            out = list(ex.map(one, range(256)))
+        assert len(out) == 256 and all(out)
+    finally:
+        p.kill(); p.wait()
