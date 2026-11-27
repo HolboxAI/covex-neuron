@@ -13,6 +13,9 @@ mkdir -p results logs; : > REHEARSAL.tsv
 port() { case $1 in q32-T) echo 8000;; q32-C) echo 8001;; asr-T) echo 8002;; asr-C) echo 8003;;
                     emb-T) echo 8004;; emb-C) echo 8005;; vl-T) echo 8006;; vl-C) echo 8007;; esac; }
 log_of() { case $1 in asr-T) echo "logs/S2-$2-T.server.log";; asr-C) echo "logs/DL-$2-C.server.log";; *) echo "logs/$1-$2.server.log";; esac; }
+NCPU=$(nproc)
+cpuset() {  # first last -> that range, or all CPUs when the host is smaller (taskset rejects absent CPUs)
+  [ "$2" -lt "$NCPU" ] && echo "$1-$2" || echo "0-$((NCPU - 1))"; }
 serve() {  # track arm port_offset modeldir cpus
   local tr=$1 a=$2 p=$(( $(port $2) + $3 )) md=$4 cpus=$5
   case $a in
@@ -53,7 +56,7 @@ track_a() {
   # REHEARSAL_PAIRS_A / _B (";"-separated) narrow the arms, e.g. for the CI harness test.
   IFS=";" read -r -a PAIRS <<< "${REHEARSAL_PAIRS_A:-q32-T q32-C;emb-T emb-C;vl-T vl-C;asr-T asr-C}"
   for pair in "${PAIRS[@]}"; do
-    i=0; for a in $pair; do serve cpu $a 100 $HOME/models-small "$((i*8))-$((i*8+7))" & SPID[$a]=$!; i=$((i+1)); done
+    i=0; for a in $pair; do serve cpu $a 100 $HOME/models-small "$(cpuset $((i*8)) $((i*8+7)))" & SPID[$a]=$!; i=$((i+1)); done
     for a in $pair; do p=$(( $(port $a) + 100 )); L=$(log_of $a cpu)
       wait_up $a $p 1200; rc=$?
       if [ ! -s "$L" ]; then record $a cpu FAIL "empty server log (did not start)"; stop $p; continue; fi
@@ -76,7 +79,7 @@ track_b() {
   IFS=";" read -r -a PAIRS <<< "${REHEARSAL_PAIRS_B:-q32-C q32-T;vl-C vl-T;emb-C}"
   for pair in "${PAIRS[@]}"; do
     for a in $pair; do need $a || { record $a compile FAIL "checkpoint not downloaded"; continue 2; }; done
-    i=0; for a in $pair; do serve compile $a 200 $HOME/models "$((16+i*24))-$((16+i*24+23))" & SPID[$a]=$!; i=$((i+1)); done
+    i=0; for a in $pair; do serve compile $a 200 $HOME/models "$(cpuset $((16+i*24)) $((16+i*24+23)))" & SPID[$a]=$!; i=$((i+1)); done
     for a in $pair; do p=$(( $(port $a) + 200 )); L=$(log_of $a compile)
       wait_up $a $p 1800; rc=$?
       bad=$(grep -m1 -oE "NCC_E[A-Z]+[0-9]+[^.]*" "$L" | cut -c1-200)

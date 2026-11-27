@@ -226,11 +226,12 @@ def test_rehearsal_harness_end_to_end_with_fake_vllm(tmp_path):
     r = subprocess.run(["bash", str(ROOT / "benchmarks/rehearsal/rehearse.sh")], cwd=run, env=env,
                        capture_output=True, text=True, timeout=600)
     tsv = (run / "REHEARSAL.tsv").read_text()
+    logs = "\n".join(f"--- {f.name}\n{f.read_text()[-1500:]}" for f in sorted((run / "logs").glob("*.log")))
     rows = {(l.split("\t")[0], l.split("\t")[1]): l.split("\t")[2] for l in tsv.splitlines() if l}
     expect = {("q32-T", "cpu"), ("q32-C", "cpu"), ("q32-C", "compile"), ("q32-T", "compile"),
               ("q32-C", "compile-alias"), ("q32-T", "compile-alias")}
     assert expect <= rows.keys(), f"missing rows: {expect - rows.keys()}\n{tsv}\n{r.stdout[-2000:]}\n{r.stderr[-2000:]}"
     bad = {k: v for k, v in rows.items() if v != "PASS"}
-    assert not bad, f"harness reported failures against a healthy fake server: {bad}\n{tsv}"
+    assert not bad, f"harness reported failures against a healthy fake server: {bad}\n{tsv}\n{logs}"
     assert (run / "REHEARSAL.md").exists()
     assert subprocess.run(["pgrep", "-f", "fake_server.py"], capture_output=True).returncode != 0, "servers left running"
