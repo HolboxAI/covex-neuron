@@ -40,20 +40,26 @@ def p90(xs):
 
 def request_p90s(ds):
     """p90 TTFT (s) and TPOT (ms) over INDIVIDUAL requests pooled across windows (vllm bench --save-detailed:
-    per-request `ttfts` and `itls`). Falls back to None when per-request data is absent; never a median of p90s."""
+    per-request `ttfts`, `itls`, `output_lens`). None when per-request data is absent or incomplete; never a median
+    of p90s."""
     import math
     ok = lambda x: isinstance(x, (int, float)) and math.isfinite(x) and x >= 0
     tt, tp = [], []
     for d in ds:
         if not d or not isinstance(d.get("ttfts"), list) or not isinstance(d.get("itls"), list):
             return None, None
-        n = d.get("completed")
+        n = d.get("completed"); ol = d.get("output_lens")
         # exactly one valid, finite record per completed request in EVERY window, or the limit is unknown
-        if len(d["ttfts"]) != n or len(d["itls"]) != n or not all(ok(x) for x in d["ttfts"]):
+        if not isinstance(ol, list) or len(d["ttfts"]) != n or len(d["itls"]) != n or len(ol) != n:
             return None, None
-        if not all(isinstance(x, list) and x and all(ok(y) for y in x) for x in d["itls"]):
+        if not all(ok(x) for x in d["ttfts"]) or not all(type(x) is int and x >= 1 for x in ol):
             return None, None
-        tt += d["ttfts"]; tp += [1000 * sum(x) / len(x) for x in d["itls"]]
+        if not all(isinstance(x, list) and all(ok(y) for y in x) for x in d["itls"]):
+            return None, None
+        tt += d["ttfts"]
+        # TPOT as pinned vLLM computes it (benchmarks/serve.py): time after the first token / (output tokens - 1).
+        # Streaming chunks (itls) can carry several tokens, so dividing by the number of intervals overstates TPOT.
+        tp += [1000 * sum(x) / (o - 1) for x, o in zip(d["itls"], ol) if o > 1]
     return p90(tt), p90(tp)
 
 
@@ -113,15 +119,21 @@ for arm in [x for x in ARMS if x in EXPLORATORY]:
         bad = summary[(arm, c)][1]
         if bad or summary[(arm, c)][0] is None:
             incomplete.append(f"{arm} (requested exploratory arm) {c}: " + ("; ".join(bad) or "no valid windows"))
-print("\n## Best passing tested point per arm (request-level p90 within the pre-registered limits)\n")
+print("\n## Best eligible tested point per arm\n")
+print("Eligible = no failed run step (provenance, profile-independent steps included), all windows complete, request-level")
+print("p90 within the pre-registered limits, and (for non-U arms) exact cache-check agreement with U at c1 and c3.\n")
 print("| Arm | Load | median tok/s | Note |\n|---|---|---|---|")
+HARD = ("ready", "provenance", "bench", "import")       # profile/evidence failures do not disqualify throughput
 for arm in ARMS:
-    ok = [(summary[(arm, c)][0], c) for c, _ in LOADS if limits.get((arm, c)) == "PASS" and summary[(arm, c)][0]
-          and not summary[(arm, c)][1]]
+    hard_fail = [f for f in failed_steps.get(arm, []) if f.split()[0].startswith(HARD)]
+    corr_ok = arm == "q32-U" or all(match_ok(f"{R}/{arm}.vs.q32-U.cache.c{k}.match.json", 18)[0] for k in (1, 3))
+    why = (["failed step: " + hard_fail[0]] if hard_fail else []) + ([] if corr_ok else ["tokens differ from U"])
+    ok = [(summary[(arm, c)][0], c) for c, _ in LOADS if not why and limits.get((arm, c)) == "PASS"
+          and summary[(arm, c)][0] and not summary[(arm, c)][1]]
     if ok:
         v, c = max(ok); print(f"| {arm} | {c} | {v} | tested points only (c1, c8); not a saturation sweep |")
     else:
-        print(f"| {arm} | – | – | no tested point passes the limits with complete windows |")
+        print(f"| {arm} | – | – | not eligible: {'; '.join(why) or 'no tested point passes the limits with complete windows'} |")
 for x in incomplete:
     print(f"INCOMPLETE (required): {x}")
 missing = [p for p in REQUIRED if p[0] not in ARMS or p[1] not in ARMS]

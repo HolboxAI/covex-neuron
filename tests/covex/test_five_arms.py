@@ -1111,10 +1111,13 @@ def test_q32_summary_request_level_p90_and_limits(tmp_path):
     def bench(n, tps, ttft_s, itl_s):
         return {"num_prompts": n, "completed": n, "failed": 0, "total_output_tokens": n * 256, "total_input_tokens": n * 1024,
                 "output_throughput": tps, "median_tpot_ms": 10.0, "median_ttft_ms": 50.0, "p90_ttft_ms": 1.0,
-                "ttfts": [ttft_s] * (n - 1) + [ttft_s * 10], "itls": [[itl_s] * 255 for _ in range(n)]}
+                "ttfts": [ttft_s] * (n - 1) + [ttft_s * 10], "itls": [[itl_s] * 255 for _ in range(n)], "output_lens": [256] * n}
     for arm, tps, tt in (("q32-U", 100.0, 0.1), ("q32-T", 100.0, 0.1), ("q32-K", 120.0, 0.5)):
         for c, n in (("c1", 8), ("c8", 32)):
             (tmp_path / f"{arm}-{c}-w1.json").write_text(json.dumps(bench(n, tps, tt, 0.02)))
+    for arm in ("q32-T", "q32-K"):                                  # correct vs U, so eligible for the headline
+        for k in (1, 3):
+            (tmp_path / f"{arm}.vs.q32-U.cache.c{k}.match.json").write_text(json.dumps({"pass": True, "n": 18}))
     r = subprocess.run(["python3", str(ROOT / "benchmarks/q32/summarize.py"), str(tmp_path), "--arms", "q32-U q32-T q32-K",
                         "--windows", "1"], capture_output=True, text=True)
     k_c8 = next(l for l in r.stdout.splitlines() if l.startswith("| q32-K | c8 |"))
@@ -1130,7 +1133,7 @@ def test_q32_request_p90_requires_complete_detailed_data_and_can_fail(tmp_path):
     def bench(n, ttfts, itl_s=0.02):
         return {"num_prompts": n, "completed": n, "failed": 0, "total_output_tokens": n * 256, "total_input_tokens": n * 1024,
                 "output_throughput": 100.0, "median_tpot_ms": 10.0, "median_ttft_ms": 50.0,
-                "ttfts": ttfts, "itls": [[itl_s] * 255 for _ in range(len(ttfts))]}
+                "ttfts": ttfts, "itls": [[itl_s] * 255 for _ in range(len(ttfts))], "output_lens": [256] * len(ttfts)}
     def run(c8_ttfts):
         for arm in ("q32-U", "q32-T", "q32-K"):
             (tmp_path / f"{arm}-c1-w1.json").write_text(json.dumps(bench(8, [0.1] * 8)))
@@ -1150,46 +1153,116 @@ def _pp():
     return m
 
 
+def _verify_loop(P, rid, target):
+    """Greedy verify simulation: accept drafts while they equal the target; then the target's own next token."""
+    out, steps, drafted = [], 0, 0
+    while len(out) < len(target):
+        draft, real = P.propose_one(rid, out); drafted += real
+        for d in draft:
+            if len(out) < len(target) and d == target[len(out)]:
+                out.append(d)
+            else:
+                break
+        if len(out) < len(target):
+            out.append(target[len(out)])
+        steps += 1
+    return out, steps
+
+
 def test_prediction_proposer_drafts_aligns_and_pads():
     pp = _pp(); P = pp.PredictionProposer(4, pad_token_id=0)
     pred = [10, 11, 12, 13, 14, 15, 16, 17, 18, 19]
-    assert P.propose_one(pred, []) == ([10, 11, 12, 13], 4)                    # start of the file
-    assert P.propose_one(pred, [10, 11, 12]) == ([13, 14, 15, 16], 4)          # aligned prefix
-    assert P.propose_one(pred, pred[:8]) == ([18, 19, 0, 0], 2)               # tail shorter than k: padded
-    assert P.propose_one(pred, pred) == ([0, 0, 0, 0], 0)                     # prediction exhausted
-    # an edit inserted [99, 98] after 12; the output then rejoins the file at 13, 14, 15 -> re-align
-    assert P.propose_one(pred, [10, 11, 12, 99, 98, 13, 14, 15]) == ([16, 17, 18, 19], 4)
-    assert P.propose_one(pred, [1, 2, 3, 4, 5]) == ([0, 0, 0, 0], 0)          # no match: plain decoding
-    assert P.propose_one(None, [1]) == ([0, 0, 0, 0], 0)                       # absent prediction
-    assert all(len(d) == 4 for d in P.propose([pred, None, []], [[10], [], [5]]))   # exactly k per request
+    P.add_request("a", pred)
+    assert P.propose_one("a", []) == ([10, 11, 12, 13], 4)
+    assert P.propose_one("a", [10, 11, 12]) == ([13, 14, 15, 16], 4)
+    assert P.propose_one("a", pred[:8]) == ([18, 19, 0, 0], 2)               # tail shorter than k: padded
+    assert P.propose_one("a", pred) == ([0, 0, 0, 0], 0)                     # exhausted
+    P.add_request("e", pred)                                                  # an edit inserts [99, 98] after 12
+    out = []
+    for tok in [10, 11, 12, 99, 98, 13, 14, 15]:
+        out.append(tok); P.propose_one("e", out)
+    assert P.propose_one("e", out) == ([16, 17, 18, 19], 4)
+    P.add_request("x", pred)
+    assert P.propose_one("x", [1, 2, 3, 4, 5]) == ([0, 0, 0, 0], 0)          # no match: plain decoding
+    assert P.propose_one("none", [1]) == ([0, 0, 0, 0], 0)                    # absent prediction
+    # mixed batch: real drafts on one row, pads on another, exactly k each
+    P.add_request("m", pred)
+    d = P.propose(["m", "none2"], [[10], [7, 8]])
+    assert d[0] == [11, 12, 13, 14] and d[1] == [0, 0, 0, 0]
 
 
-def test_prediction_from_extra_args_rejects_bad_payloads():
-    pp = _pp()
-    assert pp.prediction_from_extra_args({"covex_prediction_ids": [1, 2, 3]}) == [1, 2, 3]
-    assert pp.prediction_from_extra_args(None) is None and pp.prediction_from_extra_args({}) is None
-    assert pp.prediction_from_extra_args({"covex_prediction_ids": [1, "a", 3]}) is None
-    assert pp.prediction_from_extra_args({"covex_prediction_ids": [1, -2]}) is None
-    assert pp.prediction_from_extra_args({"covex_prediction_ids": "123"}) is None
+def test_prediction_realign_prefers_forward_match_on_repeated_ngrams():
+    """Repeated code n-grams (return x; }) must not jump to the last occurrence in the file."""
+    pp = _pp(); P = pp.PredictionProposer(3)
+    R = [7, 8, 9]                                                             # a repeated snippet
+    pred = [1, 2] + R + [20, 21, 22] + [3, 4] + R + [30, 31, 32] + [5, 6] + R + [40, 41, 42]
+    P.add_request("r", pred)
+    out = []
+    for tok in [1, 2, 99] + R:                                                # edit before the FIRST occurrence
+        out.append(tok); P.propose_one("r", out)
+    assert P.propose_one("r", out)[0] == [20, 21, 22]                        # not [40, 41, 42]
+
+
+def test_prediction_from_extra_args_validates_vocab_and_types():
+    pp = _pp(); V = 1000
+    assert pp.prediction_from_extra_args({"covex_prediction_ids": [1, 2, 999]}, V) == [1, 2, 999]
+    assert pp.prediction_from_extra_args(None, V) is None and pp.prediction_from_extra_args({}, V) is None
+    assert pp.prediction_from_extra_args({"covex_prediction_ids": [1, 1000]}, V) is None      # out of vocab
+    assert pp.prediction_from_extra_args({"covex_prediction_ids": [1, True]}, V) is None      # bool
+    assert pp.prediction_from_extra_args({"covex_prediction_ids": [1, "a"]}, V) is None
+    assert pp.prediction_from_extra_args({"covex_prediction_ids": [1, -2]}, V) is None
+    assert pp.prediction_from_extra_args({"covex_prediction_ids": "123"}, V) is None
 
 
 def test_prediction_verification_is_exact_under_greedy_acceptance():
-    """Simulate greedy verify: accept drafts while they equal the target's tokens, then append the target's next
-    token. The output must equal plain greedy decoding for perfect, edited, wrong and absent predictions."""
-    pp = _pp(); P = pp.PredictionProposer(4, pad_token_id=0)
-    target = [10, 11, 12, 99, 98, 13, 14, 15, 16, 17, 18, 19, 2]              # what greedy decoding produces
-    for pred in ([10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 2], target, [5] * 20, None, []):
-        out, steps = [], 0
-        while len(out) < len(target):
-            draft, _ = P.propose_one(pred, out)
-            for d in draft:                                                  # verify: accept matching drafts
-                if len(out) < len(target) and d == target[len(out)]:
-                    out.append(d)
-                else:
-                    break
-            if len(out) < len(target):
-                out.append(target[len(out)])                                 # the target's own next token
-            steps += 1
-        assert out == target, (pred, out)
-        assert steps <= len(target)
-    # perfect prediction: 13 tokens in ceil(13 / 5) = 3 verify steps (4 drafts + 1 bonus each)
+    pp = _pp(); EOS = 2
+    target = [10, 11, 12, 99, 98, 13, 14, 15, 16, 17, 18, 19, EOS]           # what greedy decoding produces
+    prompt_plus_file = [500, 501, 502, 503] + [10, 11, 12, 13, 14, 15, 16, 17, 18, 19, EOS]   # client sent the prompt too
+    cases = {"perfect": target, "edited": [10, 11, 12, 13, 14, 15, 16, 17, 18, 19, EOS], "wrong": [5] * 20,
+             "absent": None, "with_prompt": prompt_plus_file,
+             "eos_in_window": [10, 11, 12, 99, 98, 13, 14, 15, 16, 17, 18, 19, EOS, 7, 7, 7],
+             "longer_than_context": [10, 11, 12, 99, 98] + list(range(100, 40100))}
+    steps = {}
+    for name, pred in cases.items():
+        P = pp.PredictionProposer(4); P.add_request("r", pred)
+        out, steps[name] = _verify_loop(P, "r", target)
+        assert out == target, (name, out)
+    assert steps["perfect"] == 3                                              # 13 tokens, 4 drafts + 1 bonus per step
+    assert steps["with_prompt"] < len(target)                                 # re-aligns after the first 3 tokens
+
+
+def test_prediction_host_cost_per_step_is_small_for_10k_file():
+    import random, time
+    pp = _pp(); rng = random.Random(0)
+    pred = [rng.randrange(1000, 1100) for _ in range(10_000)]                # small vocab: many repeated n-grams
+    P = pp.PredictionProposer(4); P.add_request("r", pred)
+    target = pred[:3000] + [5, 6, 7] + pred[3000:8000]                       # one edit in the middle
+    t0 = time.perf_counter(); out, steps = _verify_loop(P, "r", target); dt = time.perf_counter() - t0
+    assert out == target
+    assert dt / steps < 0.002, f"{1000 * dt / steps:.3f} ms per step"        # < 2 ms per step on any laptop
+
+
+
+def test_q32_tpot_uses_output_tokens_and_headline_excludes_disqualified_arms(tmp_path):
+    """Astra: (1) 256 tokens, 10.2 s after the first token, in 100 streaming chunks is 40 ms/token (vLLM's formula),
+    not 102; (2) an arm with failed provenance, or with tokens that differ from U, must not be a headline point."""
+    def bench(n):
+        return {"num_prompts": n, "completed": n, "failed": 0, "total_output_tokens": n * 256, "total_input_tokens": n * 1024,
+                "output_throughput": 100.0, "median_tpot_ms": 10.0, "median_ttft_ms": 50.0, "ttfts": [0.1] * n,
+                "itls": [[0.102] * 100 for _ in range(n)], "output_lens": [256] * n}
+    for arm in ("q32-U", "q32-T", "q32-K", "q32-F"):
+        for c, n in (("c1", 8), ("c8", 32)):
+            (tmp_path / f"{arm}-{c}-w1.json").write_text(json.dumps(bench(n)))
+    for arm in ("q32-T", "q32-K", "q32-F"):
+        for k in (1, 3):
+            ok = arm != "q32-F"
+            (tmp_path / f"{arm}.vs.q32-U.cache.c{k}.match.json").write_text(json.dumps({"pass": ok, "n": 18}))
+    st = tmp_path / "STATUS.tsv"; st.write_text("q32-K\tprovenance\tFAIL wrong tree\n")
+    r = subprocess.run(["python3", str(ROOT / "benchmarks/q32/summarize.py"), str(tmp_path), "--arms", "q32-U q32-T q32-K q32-F",
+                        "--windows", "1", "--status", str(st)], capture_output=True, text=True)
+    u_c8 = next(l for l in r.stdout.splitlines() if l.startswith("| q32-U | c8 |"))
+    assert "0.100 s / 40.00 ms" in u_c8 and "| PASS |" in u_c8, u_c8
+    best = r.stdout.split("## Best eligible tested point per arm", 1)[1]
+    assert "| q32-K | – | – | not eligible: failed step: provenance" in best, best
+    assert "| q32-F | – | – | not eligible: tokens differ from U" in best, best
+    assert "| q32-U | c" in best and "| q32-T | c" in best
