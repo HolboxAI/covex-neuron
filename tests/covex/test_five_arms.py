@@ -1322,3 +1322,98 @@ def test_q32_run2_replay_and_needles_gate_eligibility(tmp_path):
     assert "NOT identical: replay diffs are not attributable" in out
     cmp = out.split("## Comparisons", 1)[1].split("##", 1)[0]
     assert "(exploratory)" in cmp                                      # F's throughput stays visible, labelled
+
+
+# ---------------- run 2 (q32/run2.sh) end to end with fakes: U=8100, Ut=8101, F=8102, K=8103 ----------------------
+RUN2_READY = (ROOT / "benchmarks/q32/replay.py").exists() and (ROOT / "benchmarks/q32/needles.py").exists()
+
+
+def _q32_run2(tmp_path, extra_env):
+    r, run = None, None
+    home = tmp_path / "home"; (home / "models/Qwen3-32B").mkdir(parents=True)
+    stub = {}
+    for k in ("upstream", "fork"):
+        stub[k] = tmp_path / f"stub-{k}"; (stub[k] / "vllm_neuron").mkdir(parents=True)
+        (stub[k] / "vllm_neuron/__init__.py").write_text("")
+    upy = tmp_path / "upstream-venv-python"
+    upy.write_text(f"""#!/bin/bash
+shift 2
+export PYTHONPATH="${{PYTHONPATH%%:*}}:{stub['upstream']}"
+exec vllm "$@"
+""")
+    upy.chmod(0o755)
+    run = tmp_path / "run"; run.mkdir()
+    env = dict(os.environ, HOME=str(home), PATH=f"{ROOT/'tests/covex/fake_bin'}:{os.environ['PATH']}",
+               PYTHONPATH=str(stub["fork"]), UPSTREAM_PY=str(upy), UPSTREAM_DIR=str(stub["upstream"]),
+               FORK_DIR=str(stub["fork"]), Q32_MIN_PROCS="1", Q32_WINDOWS="1", Q32_READY_SECS="120", **extra_env)
+    r = subprocess.run(["bash", str(ROOT / "benchmarks/q32/run2.sh")], cwd=run, env=env, capture_output=True, text=True, timeout=1200)
+    return r, run
+
+
+run2_e2e = pytest.mark.skipif(not (LINUX and RUN2_READY), reason="Linux CI, after replay.py/needles.py land")
+
+
+@run2_e2e
+def test_run2_success_with_fakes(tmp_path):
+    r, run = _q32_run2(tmp_path, {})
+    out = r.stdout[-4000:] + r.stderr[-2000:]
+    assert r.returncode == 0 and "RUN OK" in r.stdout, out
+    st = (run / "results/STATUS.tsv").read_text()
+    assert all(f"{a}\tprovenance\tPASS" in st for a in ("q32-U", "q32-Ut", "q32-F", "q32-K")), st
+    rn = (run / "results/runner.tsv").read_text()
+    assert re.search(r"q32-U\tMRv2\tnone", rn) and re.search(r"q32-Ut\tMRv1\t\[2048,8192\]", rn), rn
+    assert "7.00 GiB headroom (explicit)" in rn, rn                           # equal explicit headroom recorded
+    res = (run / "RESULTS.md").read_text()
+    assert "U run twice on the same batch: identical" in res, res
+    assert not list((run / "results").glob("q32-K-c*-w*.json")), "K is replay-only"
+    for tag in ("c1", "c8", "m5k-c8"):
+        assert all((run / f"results/{a}-{tag}-w1.json").exists() for a in ("q32-U", "q32-Ut", "q32-F")), tag
+    best = res.split("## Best eligible tested point per arm and workload", 1)[1]
+    assert "| q32-Ut | m5k-c8 |" in best and "not eligible:" not in best.split("| q32-Ut |", 1)[1].split("\n", 1)[0], best
+
+
+@run2_e2e
+def test_run2_needle_failure_is_a_finding_not_a_run_failure(tmp_path):
+    r, run = _q32_run2(tmp_path, {"FAKE_NEEDLE_WRONG": "8101:24044"})
+    assert r.returncode == 0 and "RUN OK" in r.stdout, r.stdout[-3000:]
+    best = (run / "RESULTS.md").read_text().split("## Best eligible", 1)[1]
+    assert "| q32-Ut | – | – | not eligible: needles failed at 24044" in best, best
+
+
+@run2_e2e
+def test_run2_failed_u_profile_skips_other_profiles_and_continues(tmp_path):
+    r, run = _q32_run2(tmp_path, {"FAKE_PROFILE_ALLOC_FAIL_PORTS": "8100"})
+    st = (run / "results/STATUS.tsv").read_text()
+    assert r.returncode == 0 and "RUN OK" in r.stdout, r.stdout[-3000:] + st
+    assert re.search(r"q32-U\tprofile\tFAILED \(stage times unknown\)", st), st
+    assert "q32-Ut\tprofile\tSKIPPED" in st and "q32-F\tprofile\tSKIPPED" in st, st
+    assert (run / "results/q32-F-m5k-c8-w1.json").exists()
+
+
+@run2_e2e
+def test_run2_arm_dying_mid_run_is_incomplete_but_summarized(tmp_path):
+    r, run = _q32_run2(tmp_path, {"FAKE_DIE_AFTER": "8102:60"})
+    assert r.returncode == 1 and "RUN INCOMPLETE" in r.stdout, r.stdout[-3000:]
+    assert (run / "RESULTS.md").exists() and (run / "results/q32-U-c1-w1.json").exists()
+
+
+@run2_e2e
+def test_run2_stops_at_once_when_u_is_not_ready(tmp_path):
+    import time
+    t0 = time.time()
+    r, run = _q32_run2(tmp_path, {"FAKE_SLOW_READY": "8100:600", "Q32_READY_SECS": "10"})
+    assert r.returncode == 1 and "nothing to compare against" in r.stdout, r.stdout[-3000:]
+    assert time.time() - t0 < 120 and (run / "RESULTS.md").exists()
+    assert subprocess.run(["pgrep", "-f", "fake_server.py"], capture_output=True).returncode != 0, "servers left running"
+
+
+def test_run2_payload_renders_with_pins_deadline_and_run2(tmp_path):
+    out = tmp_path / "p.sh"
+    r = subprocess.run(["bash", str(ROOT / "benchmarks/q32/render_payload.sh"), *PINS, str(out), "", "3"],
+                       env=dict(os.environ, TEMPLATE=str(ROOT / "benchmarks/q32/payload2.sh"), READY_SECS="3000"),
+                       capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    t = out.read_text()
+    assert "@@" not in t and "benchmarks/q32/run2.sh" in t and "Q32_READY_SECS=3000" in t and "Q32_DEADLINE=" in t
+    m = re.search(r"^shutdown -h \+(\d+)", t, re.M)
+    assert m and int(m.group(1)) * 8.60 / 60 <= 11.0, "hard stop must stay inside the $11 cap"
