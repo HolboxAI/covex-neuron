@@ -1725,5 +1725,7 @@ def test_emb_replay_payload_renders_and_caps(tmp_path):
     t = out.read_text()
     assert "@@" not in t and "benchmarks/emb/replay_pairs.py" in t and "--log logs/replay.log" in t and 'P="emb-replay/$RUN_ID"' in t
     assert "COVEX_PACK_TRACE=1" in t
+    assert '"diagnostic_only": True' in t and '"arms": ["offline-emb-P8"]' in t
+    assert '"arms": ["emb-U", "emb-T", "emb-P4", "emb-P8"]' not in t
     m = re.search(r"^shutdown -h \+(\d+)", t, re.M)
     assert m and int(m.group(1)) * 8.60 / 60 <= 4.5

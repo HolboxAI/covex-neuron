@@ -34,7 +34,7 @@ T pip install -q --no-deps -e covex-neuron && T pip install -q httpx huggingface
 ~/venv-upstream/bin/python -m pip freeze > ~/run/pip_freeze_upstream.txt; pip freeze > ~/run/pip_freeze.txt
 T hf download Qwen/Qwen3-Embedding-8B --revision @@MODEL_REV@@ --local-dir ~/models/Qwen3-Embedding-8B > /dev/null && ls ~/models/Qwen3-Embedding-8B/config.json || fail model
 mkdir -p ~/data && T aws s3 cp s3://$B/inputs/sixdata.tgz - --region $R | tar xz -C ~/data && ls ~/data/sixdata/embed/t64.jsonl || fail data
-# run manifest: everything needed to reproduce or audit this attempt
+# Run manifest: this is one offline fork diagnostic, not a stock-versus-fork throughput or correctness run.
 python3 - > ~/run/manifest.json <<PY
 import hashlib, json, subprocess as sp
 sh = lambda c: sp.run(c, shell=True, capture_output=True, text=True).stdout.strip()
@@ -48,9 +48,10 @@ print(json.dumps({"run_prefix": "$P", "instance_type": it[0], "ami": it[1], "reg
   "model": "Qwen/Qwen3-Embedding-8B", "model_revision": "@@MODEL_REV@@",
   "neuron_packages": [l for l in freeze.splitlines() if any(k in l.lower() for k in ("neuron", "nki", "libneuronxla", "vllm", "torch"))],
   "pip_freeze_sha256": fhash("/home/ubuntu/run/pip_freeze.txt"),
-  "arms": ["emb-U", "emb-T", "emb-P4", "emb-P8"], "windows": int("@@WINDOWS@@"), "lens": ["t64"], "concurrency": 32,
-  "requests_per_window": 256, "chips_per_arm": 2, "ready_deadline_min_from_boot": int("@@READY_MIN@@"),
-  "correctness": "every vector of window 1 vs U and vs T: dimension, finite, norm, prompt identity, cosine >= 0.9999",
+  "arms": ["offline-emb-P8"], "diagnostic_only": True, "repeat": 3,
+  "cases": ["B", "A+B", "A'+B", "B+A", "B+A'", "X+B"], "chips_per_arm": 2,
+  "ready_deadline_min_from_boot": int("@@READY_MIN@@"),
+  "correctness": "diagnostic of packed-step peer dependence; this run alone cannot establish stock vector parity or claim a speedup",
   "payload_template_render_sha256": "@@PAYLOAD_SHA@@"}, indent=1))   # digest of the rendered script BEFORE this field is filled
 PY
 aws s3 cp ~/run/manifest.json s3://$B/$P/manifest.json --region $R --only-show-errors

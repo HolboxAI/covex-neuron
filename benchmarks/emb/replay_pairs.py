@@ -21,7 +21,7 @@ Verdict (written to the JSON, not decided by the caller):
   inconclusive          a case did not run as exactly one step of its own requests, B's offset/padding/bucket was not
                         identical across repeats or between the two cases of a peer comparison, or an identical
                         repeat changed B (exit 1)
-B is bound to its own request id (submission order) in the trace, never just by member count.
+B is bound to the request id returned with its embedding, and the trace must confirm packed=True.
 """
 import argparse
 import json
@@ -39,40 +39,38 @@ def vec_cmp(a, b):
             "max_abs_delta": max((abs(x - y) for x, y in zip(a, b)), default=0.0)}
 
 
-TRACE = re.compile(r"COVEX_PACK_TRACE prefill step: members=(\[.*?\]) total_padded=(\d+)")
+TRACE = re.compile(r"COVEX_PACK_TRACE prefill step: members=(\[.*?\]) total_padded=(\d+) "
+                   r"padded_num_reqs=(\d+) packed=(True|False)")
 
 
 def trace_steps(text):
     import ast
-    out, seen = [], set()
+    out, seen = [], {}
     for m in TRACE.finditer(text):
         members = ast.literal_eval(m.group(1))
         key = tuple(sorted(x["req"] for x in members))
+        step = {"members": members, "total_padded": int(m.group(2)), "packed": m.group(4) == "True"}
         if key not in seen:          # every TP rank logs the same step
-            seen.add(key); out.append({"members": members, "total_padded": int(m.group(2))})
+            seen[key] = step; out.append(step)
+        elif seen[key] != step:      # disagreeing rank traces cannot certify a single packed layout
+            out.append(step)
     return out
 
 
-def _num(req):
-    """Offline request ids are consecutive counters (possibly with a suffix); order of submission = numeric order."""
-    m = re.search(r"\d+", str(req))
-    return int(m.group()) if m else -1
-
-
-def layout(steps, order):
+def layout(steps, order, request_ids):
     """B's physical placement for one case: the single step that holds exactly this case's requests, B bound to its own
-    request id (the id submitted at B's position). None when the case did not run as one step."""
-    if len(order) == 1:
-        if len(steps) != 1 or len(steps[0]["members"]) != 1:
-            return None
-        m = steps[0]["members"][0]
-        return {"b_req": m["req"], "b_offset": m["start"], "b_padded": m["padded"], "bucket": steps[0]["total_padded"]}
-    if len(steps) != 1 or len(steps[0]["members"]) != len(order):
+    request id returned with B's embedding. None when the case did not run as one packed step."""
+    if (len(steps) != 1 or not steps[0]["packed"] or len(request_ids) != len(order)
+            or any(not isinstance(req, str) or not req for req in request_ids)
+            or len(set(request_ids)) != len(order)):
         return None
-    by_id = sorted(steps[0]["members"], key=lambda m: _num(m["req"]))
-    b = by_id[order.index("B")]
+    members = steps[0]["members"]
+    if len(members) != len(order) or {m["req"] for m in members} != set(request_ids):
+        return None
+    b_req = request_ids[order.index("B")]
+    b = next(m for m in members if m["req"] == b_req)
     return {"b_req": b["req"], "b_offset": b["start"], "b_padded": b["padded"], "bucket": steps[0]["total_padded"],
-            "members": [(m["req"], m["start"], m["tokens"], m["padded"]) for m in steps[0]["members"]]}
+            "members": [(m["req"], m["start"], m["tokens"], m["padded"]) for m in members]}
 
 
 def pick(texts, tok):
@@ -117,7 +115,8 @@ def main(argv=None):
             start = log.stat().st_size if log.exists() else 0
             outs = llm.embed([prompts[k] for k in order], use_tqdm=False)
             vectors.setdefault(name, []).append(list(outs[order.index("B")].outputs.embedding))
-            lay = layout(trace_steps(log.read_text(errors="replace")[start:]), order)
+            lay = layout(trace_steps(log.read_text(errors="replace")[start:]), order,
+                         [getattr(out, "request_id", None) for out in outs])
             runs.append({"case": name, "repeat": rep, "order": order, "layout": lay})
     why = []
     lay = {}

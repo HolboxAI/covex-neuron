@@ -10,13 +10,13 @@ STUB_VLLM = r'''
 import hashlib, os, sys, types
 MODE = os.environ["STUB_MODE"]; LOG = os.environ["STUB_LOG"]; N = [0]
 class _O:
-    def __init__(s, e): s.outputs = types.SimpleNamespace(embedding=e)
+    def __init__(s, e, request_id): s.outputs = types.SimpleNamespace(embedding=e); s.request_id = request_id
 class LLM:
     def __init__(s, **kw): pass
     def embed(s, prompts, use_tqdm=False):
         ids = []
         for _ in prompts:
-            N[0] += 1; ids.append(str(N[0]))
+            N[0] += 1; ids.append(f"opaque-{1000-N[0]}" if MODE == "opaque" else str(N[0]))
         start = 0; mem = []
         for i, p in zip(ids, prompts):
             n = len(p.split()); mem.append({"req": i, "start": start, "tokens": n, "padded": n}); start += n
@@ -28,7 +28,7 @@ class LLM:
             for g in groups:
                 tp = sum(m["padded"] for m in g) + (8 if MODE == "bucket_drift" and N[0] % 3 == 0 else 0)
                 for rank in (0, 1):
-                    f.write(f"(Worker_TP{rank}) INFO COVEX_PACK_TRACE prefill step: members={g!r} total_padded={tp} padded_num_reqs=8 packed=True\n")
+                    f.write(f"(Worker_TP{rank}) INFO COVEX_PACK_TRACE prefill step: members={g!r} total_padded={tp} padded_num_reqs=8 packed={MODE != 'not_packed'}\n")
         out = []
         for k, p in enumerate(prompts):
             v = [float(b) for b in hashlib.sha256(p.encode()).digest()[:4]]
@@ -36,7 +36,7 @@ class LLM:
             if len(prompts) > 1 and not split:
                 if MODE == "offset" and k > 0: v[0] += 1e-3                       # depends on position only
                 if MODE == "peer" and k > 0: v[0] += hashlib.sha256(prompts[0].encode()).digest()[0] * 1e-4 + 1e-4
-            out.append(_O(v))
+            out.append(_O(v, "missing-from-trace" if MODE == "wrong_id" and len(ids) > 1 and k == 1 else ids[k]))
         return out
 '''
 STUB_TOK = '''
@@ -98,3 +98,19 @@ def test_b_is_bound_by_request_id_not_trace_order(tmp_path):
     rc, d = _run(tmp_path, "reorder")
     lay = d["layouts"]
     assert rc == 0 and lay["A+B"][0][0] == 5 and lay["B+A"][0][0] == 0, lay        # B second at offset len(A)=5
+
+
+def test_opaque_request_ids_bind_b_from_output_not_numeric_sort(tmp_path):
+    rc, d = _run(tmp_path, "opaque")
+    assert rc == 0 and d["packing_verified"], d
+    assert d["layouts"]["A+B"][0][0] == 5 and d["layouts"]["B+A"][0][0] == 0, d
+
+
+def test_unpacked_step_is_inconclusive_even_with_both_members(tmp_path):
+    rc, d = _run(tmp_path, "not_packed")
+    assert rc == 1 and d["verdict"] == "inconclusive" and not d["packing_verified"], d
+
+
+def test_output_id_must_match_the_packed_trace(tmp_path):
+    rc, d = _run(tmp_path, "wrong_id")
+    assert rc == 1 and d["verdict"] == "inconclusive", d
