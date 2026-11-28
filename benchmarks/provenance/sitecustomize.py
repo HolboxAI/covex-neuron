@@ -35,16 +35,28 @@ class _RecordVllmNeuron:
     system would use, with the final sys.path including the script/cwd entry) and record the spec they return.
     Resolving at sitecustomize time would miss the cwd entry that `python -m` adds later."""
     def find_spec(self, name, path=None, target=None):
-        if name != "vllm_neuron":
+        kernel = os.environ.get("SIX_KERNEL_EVIDENCE") == "1" and name.startswith(
+            ("nkilib.", "nkilib_src.nkilib.", "neuronxcc.private_nkl.nkilib.")
+        )
+        if name != "vllm_neuron" and not kernel:
             return None
         for f in sys.meta_path:
             if f is self or not hasattr(f, "find_spec"):
                 continue
             spec = f.find_spec(name, path, target)
             if spec is not None:
-                _write(spec)
+                if kernel:
+                    try:
+                        from kernel_files import record
+                        record(os.environ["COVEX_PROVENANCE_DIR"], os.environ["COVEX_ARM"], os.getpid(),
+                               name, spec.origin, os.environ.get("COVEX_NKILIB_FA_TILE_SIZE"))
+                    except (OSError, KeyError, TypeError) as exc:
+                        sys.stderr.write(f"campaign kernel provenance: {exc}\n")
+                else:
+                    _write(spec)
                 return spec
-        _write(None)
+        if not kernel:
+            _write(None)
         return None
 
 

@@ -14,6 +14,13 @@ EXPECTED_FLAGS = {"q32-U": set(), "q32-T": set(), "q32-K": {"COVEX_QWEN3_INKERNE
                   "q32-Ut": set(), "emb-U": set(), "emb-T": set(), "emb-P4": set(), "emb-P8": set(), "emb-P16": set(),
                   "emb-P1x": {"COVEX_FORCE_PACKED_ATTENTION"}, "emb-P8t": {"COVEX_PACK_TRACE"}}
 
+EXPECTED_FLAGS.update({
+    "q32-F4": {"COVEX_DECODE_DYNAMIC_FA", "COVEX_NKILIB_FA_TILE_SIZE"},
+    "llama-U": set(), "llama-E3": set(), "llama-K2": {"COVEX_LLAMA_FUSED_PAIRS"},
+    "oss-U": set(), "oss-P": {"COVEX_GPT_OSS_SKIP_PADDED_ROUTES"},
+    "oss-U8k": set(), "oss-P8k": {"COVEX_GPT_OSS_SKIP_PADDED_ROUTES"},
+})
+
 
 CACHE_KEYS = ("NEURON_LIBTORCH_CACHE_ROOT", "VLLM_CACHE_ROOT", "TORCH_NEURONX_NEFF_CACHE_DIR")
 
@@ -70,6 +77,12 @@ def verify(pdir, min_procs, expect, tp=0, logs=None):
             pids = {r.get("pid") for r in rs}
             for lp in logs[arm].split(","):   # replicas: one log per replica, each with its own TP ranks + engine
                 roles = log_ranks(lp)
+                if os.environ.get("SIX_KERNEL_EVIDENCE") == "1":
+                    from kernel_files import verify_sources
+                    try:
+                        verify_sources(pdir, arm, roles, tp)
+                    except ValueError as exc:
+                        why.append(str(exc))
                 miss = [k for k in [f"TP{i}" for i in range(tp)] + ["EngineCore"] if roles.get(k) not in pids]
                 if miss:
                     why.append(f"{os.path.basename(lp)}: no provenance record for {miss} (log pids {[roles.get(k) for k in miss]})")

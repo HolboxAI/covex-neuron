@@ -12,6 +12,7 @@ from nkilib.experimental.transformer.attention_block_tkg_sharding import (
 # [B, kv_heads, num_blocks]; a 2D-table GQA request routes to the torch fallback
 # (see _can_use_attention_block_kernel).
 
+import os
 from typing import Optional, Tuple
 
 import torch
@@ -69,6 +70,11 @@ def _maybe_enable_pv_swap_mm2():
 
 
 _maybe_enable_pv_swap_mm2()
+if envs.COVEX_DECODE_DYNAMIC_FA and "COVEX_NKILIB_FA_TILE_SIZE" in os.environ:
+    from nkilib.core.attention.attention_tkg_utils import _FA_TILE_SIZE
+
+    if _FA_TILE_SIZE != int(os.environ["COVEX_NKILIB_FA_TILE_SIZE"]):
+        raise ValueError("The loaded NKI attention kernel does not support the requested tile size")
 
 from vllm_neuron.functional.attention.attention_decode_mask import (
     _resize_block_len as _mask_resize_block_len,

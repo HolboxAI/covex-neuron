@@ -1,0 +1,87 @@
+#!/bin/bash
+set -euo pipefail
+root=@@ROOT@@
+export AWS_DEFAULT_REGION=@@REGION@@
+minutes=@@MINUTES@@
+# The instance launcher must use terminate-on-shutdown. Count elapsed boot time.
+read -r up _ < /proc/uptime
+left=$((minutes - ${up%.*} / 60))
+if ((left <= 0)); then shutdown -h now; exit 1; fi
+shutdown -h "+$left"
+exec > /var/log/covex-campaign.log 2>&1
+attempt="$(date -u +%Y%m%dT%H%M%SZ)-$(cat /proc/sys/kernel/random/uuid)"
+prefix="$root/six/$attempt"
+out="/home/ubuntu/campaign-$attempt"
+install -d -m 0755 -o ubuntu -g ubuntu "$out"
+echo RUNNING > "$out/STATUS"
+sync_results() {
+  aws s3 sync "$out/" "$prefix/" --only-show-errors --exclude '*/cache/*' --exclude '*.tmp'
+  aws s3 cp /var/log/covex-campaign.log "$prefix/run.log" --only-show-errors
+}
+(while true; do sync_results || true; sleep 55; done) &
+uploader=$!
+finish() {
+  local rc=$?
+  trap - EXIT TERM INT
+  kill "$uploader" 2>/dev/null || true
+  echo "RUN_EXIT=$rc" > "$out/STATUS"
+  timeout 45 bash -c 'aws s3 sync "$1/" "$2/" --only-show-errors --exclude "*/cache/*" --exclude "*.tmp" && aws s3 cp /var/log/covex-campaign.log "$2/run.log" --only-show-errors' _ "$out" "$prefix" || true
+  shutdown -h now
+  exit "$rc"
+}
+trap finish EXIT
+trap 'exit 143' TERM INT
+sudo -iu ubuntu env CAMPAIGN_OUT="$out" CAMPAIGN_ROOT="$root" AWS_DEFAULT_REGION="$AWS_DEFAULT_REGION" bash <<'BOOT'
+set -euo pipefail
+stage="$(mktemp -d "$HOME/campaign-src.XXXXXXXX")"
+cd "$stage"
+aws s3 cp "$CAMPAIGN_ROOT/inputs/@@BLOB@@" sources.tgz --only-show-errors
+echo '@@SHA@@  sources.tgz' | sha256sum -c -
+tar xzf sources.tgz
+git clone -q -b campaign engines.bundle fork
+git clone -q -b upstream engines.bundle upstream
+test "$(git -C fork rev-parse HEAD)" = @@FORK@@
+test "$(git -C upstream rev-parse HEAD)" = @@UPSTREAM@@
+v=/opt/aws_neuronx_venv_pytorch_inference_vllm_0_29_0_1_2_0
+cp -a "$v" "$stage/venv-upstream"
+export UPSTREAM_DIR="$stage/upstream" UPSTREAM_PY="$stage/venv-upstream/bin/python" FORK_PY="$v/bin/python"
+export Q32_NKI_SRC="$stage/qwen" LLAMA_NKI_SRC="$stage/llama" MODELS_DIR="$HOME/models"
+export SIX_DATA="$stage/data/sixdata" CLIENT_DIR="$stage/asr"
+"$UPSTREAM_PY" -m pip install -q --no-deps -e "$UPSTREAM_DIR"
+"$FORK_PY" -m pip install -q --no-deps -e "$stage/fork"
+export PATH="$v/bin:$PATH"
+mkdir -p "$stage/data" "$CLIENT_DIR" "$MODELS_DIR"
+for item in sixdata asr_client asr_data; do
+  aws s3 cp "$CAMPAIGN_ROOT/inputs/$item.tgz" "$item.tgz" --only-show-errors
+done
+sha256sum -c <<'CHECKS'
+2cc639bf460d7f4db85885be47b57962e8e3d840d88b4d995767a06fedf64b29  sixdata.tgz
+e9d1fb38161a85213089bc23f507ebe98358e099a7086943d529558cb81173e3  asr_client.tgz
+f9ee9a11b9d578ba616b0d5c115e01909ce9934bf363e20ad8613b08369f0d74  asr_data.tgz
+CHECKS
+tar xzf sixdata.tgz -C "$stage/data"
+tar xzf asr_client.tgz -C "$CLIENT_DIR"
+tar xzf asr_data.tgz -C "$CLIENT_DIR"
+"$FORK_PY" -m pip install -q httpx soundfile jiwer
+"$FORK_PY" -m pip freeze > "$CAMPAIGN_OUT/fork-packages.txt"
+"$UPSTREAM_PY" -m pip freeze > "$CAMPAIGN_OUT/upstream-packages.txt"
+cp fork/benchmarks/six/model_pins.json "$CAMPAIGN_OUT/"
+"$FORK_PY" - "$CAMPAIGN_OUT/model_pins.json" <<'MODELS'
+from concurrent.futures import ThreadPoolExecutor
+import json, os, sys
+from pathlib import Path
+from huggingface_hub import snapshot_download
+
+def download(item):
+    model, revision = item
+    dst = Path(os.environ["MODELS_DIR"]) / model.split("/")[1]
+    snapshot_download(model, revision=revision, local_dir=dst, ignore_patterns=["original/*", "*.gguf"])
+    metadata = dst / ".cache/huggingface/download/config.json.metadata"
+    if metadata.read_text().splitlines()[0] != revision:
+        raise RuntimeError(f"{model}: local snapshot does not match {revision}")
+
+with ThreadPoolExecutor(max_workers=3) as pool:
+    list(pool.map(download, json.loads(Path(sys.argv[1]).read_text()).items()))
+MODELS
+"$FORK_PY" fork/benchmarks/six/run.py --out "$CAMPAIGN_OUT/results"
+BOOT

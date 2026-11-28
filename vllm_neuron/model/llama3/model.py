@@ -1536,6 +1536,21 @@ class LlamaModel(nn.Module):
         # Eagle3 speculative decoding: layer indices whose hidden states
         # are collected for the draft model.  Empty until the drafter sets them.
         self.aux_hidden_state_layers = []
+        self.fused_decode = None
+        if envs.COVEX_LLAMA_FUSED_PAIRS:
+            if (self.world_size != 8 or tuple(self.tp_group.ranks) != tuple(range(8))
+                    or self.embedding_dp_size != 1 or self.mlp_dp_group.world_size != 1
+                    or config.quant_spec is not None or config.use_draft_mlp_groups
+                    or (config.hidden_size, config.intermediate_size, config.num_hidden_layers,
+                        config.num_attention_heads, config.num_key_value_heads, config.head_dim)
+                    != (4096, 14336, 32, 32, 8, 128)
+                    or config.torch_dtype != torch.bfloat16 or self.layers[0].self_attn.dcp_size != 1
+                    or self.layers[0].self_attn.attention_dp_size != 1):
+                raise ValueError("COVEX_LLAMA_FUSED_PAIRS requires unquantized Llama 3.1 8B, TP8, DP1, DCP1")
+            from .fused_pair import decode_layers
+            self.fused_decode = decode_layers
+            self.fused_ranks = tuple(self.tp_group.ranks)
+
 
     def forward(
         self,
@@ -1600,15 +1615,20 @@ class LlamaModel(nn.Module):
         )
 
         aux_hidden_states = []
-        for idx, decoder_layer in enumerate(self.layers):
-            if idx in self.aux_hidden_state_layers:
-                aux_hidden_states.append(hidden_states)
-            hidden_states = decoder_layer(
-                hidden_states,
-                positions=positions,
-                position_embeddings=position_embeddings,
-                attn_metadata=attn_metadata,
+        if self.fused_decode is not None and not is_prefill and max_query_len == 1 and not self.aux_hidden_state_layers:
+            hidden_states = self.fused_decode(
+                self.layers, hidden_states, positions, position_embeddings, attn_metadata, self.fused_ranks
             )
+        else:
+            for idx, decoder_layer in enumerate(self.layers):
+                if idx in self.aux_hidden_state_layers:
+                    aux_hidden_states.append(hidden_states)
+                hidden_states = decoder_layer(
+                    hidden_states,
+                    positions=positions,
+                    position_embeddings=position_embeddings,
+                    attn_metadata=attn_metadata,
+                )
 
         hidden_states = self.norm(hidden_states)
 

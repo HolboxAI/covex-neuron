@@ -32,7 +32,7 @@ async def run_pool(n, conc, make):
 
 def summary(n, conc, wall, lat, extra):
     return {"n": n, "concurrency": conc, "wall_s": round(wall, 3), "req_per_s": round(n / wall, 3),
-            "lat_p50_ms": round(1000 * statistics.median(lat), 1), "lat_p90_ms": round(1000 * sorted(lat)[int(0.9 * len(lat)) - 1], 1), **extra}
+            "latencies_s": lat, "lat_p50_ms": round(1000 * statistics.median(lat), 1), "lat_p90_ms": round(1000 * sorted(lat)[int(0.9 * len(lat)) - 1], 1), **extra}
 
 def emb(port, path, n, conc, out):
     texts = [json.loads(l)["text"] for l in open(path)]

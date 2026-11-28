@@ -13,7 +13,7 @@ export VLLM_NEURON_COMPILATION_TIMEOUT=3600 VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=1
 mkdir -p logs
 [ "${DRYRUN:-0}" = 1 ] && cd "$(mktemp -d)"
 case "$ARM" in
-  q32-U|q32-Ut|q32-T|q32-K|q32-F|q32-C)  # Qwen3-32B, TP8, 32K context, cap 0.5, identical config in every arm:
+  q32-U|q32-Ut|q32-T|q32-K|q32-F|q32-F4|q32-C)  # Qwen3-32B, TP8, 32K context, cap 0.5, identical config in every arm:
     #   U = pinned upstream vllm-neuron in its own venv (UPSTREAM_PY); provenance checked per process by q32/run.sh
     #   Ut = the same upstream + decode_context_length_buckets [2048, 8192] (upstream feature; selects MRv1)
     #   T = this fork, flags off   K = in-kernel KV write only   F = dynamic FA only   C = both
@@ -27,6 +27,9 @@ case "$ARM" in
               CTX='"decode_context_length_buckets":[2048,8192],' ;;
       q32-T) CORES=${Q32_CORES:-0-7} ;;
       q32-K) CORES=${Q32_CORES:-8-15}; export COVEX_QWEN3_INKERNEL_KV_WRITE=1 ;;
+      q32-F4) CORES=${Q32_CORES:-8-15}; export COVEX_DECODE_DYNAMIC_FA=1 COVEX_NKILIB_FA_TILE_SIZE=4096
+              export PYTHONPATH="${Q32_NKI_SRC:?set Q32_NKI_SRC to the corrected NKI checkout src directory}${PYTHONPATH:+:$PYTHONPATH}"
+              unset NKILIB_FORCE_BUNDLED_LIBRARY ;;
       q32-F) CORES=${Q32_CORES:-8-15}; export COVEX_DECODE_DYNAMIC_FA=1 ;;
       q32-C) CORES=${Q32_CORES:-8-15}; export COVEX_DECODE_DYNAMIC_FA=1 COVEX_QWEN3_INKERNEL_KV_WRITE=1 ;;
     esac
@@ -93,15 +96,22 @@ case "$ARM" in
     ARGS=("$M/gpt-oss-20b" --served-model-name m --tensor-parallel-size 8 --max-model-len 16384
           --max-num-batched-tokens 8192 --max-num-seqs 4 --no-enable-prefix-caching --hf-overrides '{"quantization_config": {}}'
           ); CFG="{\"neuron_config\":{\"num_batched_tokens_buckets\":$OSS_BUCKETS,\"num_seqs_buckets\":[4],\"on_device_sampling_config\":{\"all_greedy\":true}}}" ;;
-  llama-U|llama-F)
+  llama-U|llama-F|llama-K2|llama-E3)
     CORES=0-7
     if [ "$ARM" = llama-F ]; then export COVEX_DECODE_DYNAMIC_FA=1; fi
     ARGS=("$M/Llama-3.1-8B-Instruct" --served-model-name m --dtype bfloat16 --tensor-parallel-size 8
           --max-model-len 16384 --max-num-batched-tokens 8192 --max-num-seqs 8 --no-enable-prefix-caching)
-    CFG='{"neuron_config":{"num_batched_tokens_buckets":[1024,8192],"num_seqs_buckets":[1,2,4,8],"on_device_sampling_config":{"all_greedy":true}}}' ;;
+    CFG='{"neuron_config":{"num_batched_tokens_buckets":[1024,8192],"num_seqs_buckets":[1,2,4,8],"on_device_sampling_config":{"all_greedy":true}}}'
+    case "$ARM" in
+      llama-K2) export COVEX_LLAMA_FUSED_PAIRS=1
+                export PYTHONPATH="${LLAMA_NKI_SRC:?set LLAMA_NKI_SRC to the patched transformer checkout src directory}${PYTHONPATH:+:$PYTHONPATH}"
+                unset NKILIB_FORCE_BUNDLED_LIBRARY ;;
+      llama-E3) draft="${LLAMA_E3_DIR:-$M/Llama-3.1-8B-Instruct-speculator.eagle3}"
+                ARGS+=(--speculative-config "$(python3 -c 'import json,sys;print(json.dumps(dict(method="eagle3",model=sys.argv[1],num_speculative_tokens=3)))' "$draft")") ;;
+    esac ;;
   *) echo "unknown arm $ARM" >&2; exit 2 ;;
 esac
-case "$ARM" in vl-U|oss-U|oss-U8k|llama-U) VLLM=("${UPSTREAM_PY:?upstream Python required}" -m vllm.entrypoints.cli.main) ;; esac
+case "$ARM" in vl-U|oss-U|oss-U8k|llama-U|llama-E3) VLLM=("${UPSTREAM_PY:?upstream Python required}" -m vllm.entrypoints.cli.main) ;; esac
 if [ -n "${SUITE_PYTHON:-}" ]; then VLLM=("$SUITE_PYTHON" -m vllm.entrypoints.cli.main); fi
 CORES=${SUITE_CORES:-$CORES}
 # CPU mode runs on host CPUs; core ranges apply on Trainium and in CPU compile (compile-cache prefix).

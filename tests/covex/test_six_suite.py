@@ -26,18 +26,18 @@ def test_reuse_embedding_results_independently(tmp_path):
             (results / f"{arm}-t64-w{w}.json").write_text(json.dumps(result))
     (results / "STATUS.tsv").write_text("\n".join(statuses))
     read = suite["import_embedding"]
-    assert read(tmp_path, 3, "emb-P4")["ratio"] == 2
-    for revision, ratio in (("unknown", None), ("63b0d89fdecb9a8df314c927a3ac9d99a319b85e", 2)):
+    assert read(tmp_path, 3, "emb-P4")["covex"] == 60
+    for revision, ratio in (("unknown", None), ("63b0d89fdecb9a8df314c927a3ac9d99a319b85e", None)):
         manifest["covex_neuron"] = revision
         (tmp_path / "manifest.json").write_text(json.dumps(manifest))
         assert read(tmp_path, 3, "emb-P4")["ratio"] == ratio
-    assert read(tmp_path, 3, "emb-P8")["ratio"] == 3
+    assert "isolation and pooled p90 unavailable" in read(tmp_path, 3, "emb-P8")["status"]
     path = results / "emb-P8-t64-w1.json"
     obj = json.loads(path.read_text())
     obj["vectors"][17] = [0, 1]
     path.write_text(json.dumps(obj))
     rows = [read(tmp_path, 3, arm) for arm in ("emb-P4", "emb-P8")]
-    assert [r["ratio"] for r in rows] == [2, None]
+    assert [r["ratio"] for r in rows] == [None, None]
     suite["write_summary"](tmp_path, rows)
     assert "packed vectors differ" in (tmp_path / "RESULTS.md").read_text()
 
@@ -45,7 +45,7 @@ def test_reuse_embedding_results_independently(tmp_path):
 def test_live_modalities_require_matched_work(tmp_path):
     suite = runpy.run_path(str(SUITE))
     waves = suite["WAVES"]
-    for model in (waves[0][1], waves[0][2], waves[1][1]):
+    for model in (m for wave in waves for m in wave if m.kind in ("emb", "asr", "vl")):
         source = {}
         dirs = {}
         for arm in (model.stock, model.fork):
@@ -53,15 +53,18 @@ def test_live_modalities_require_matched_work(tmp_path):
             dirs[arm].mkdir()
             for c in model.loads:
                 if model.kind == "emb":
-                    result = dict(n=256, concurrency=c, seq_per_s=2,
+                    (dirs[arm] / "isolation.json").write_text(json.dumps(dict(
+                        peer_invariant=True, repeat_stable=True, packed_step_verified=True,
+                        **{"pass": True})))
+                    result = dict(n=256, concurrency=c, seq_per_s=2, latencies_s=[0.2]*256,
                                   input_ids=list(map(str, range(256))), vectors=[[1.0, 2.0]]*256)
                 elif model.kind == "asr":
                     result = dict(phases={"transcribe": [dict(concurrency=c, n_total=100,
                                   n_success=100, n_error=0, wer_mean=.06, audio_seconds_per_s=2)]},
                                   raw_results=[dict(phase="transcribe", concurrency=c, is_warmup=False, success=True,
-                                               round_idx=0, sample_id=str(i), audio_duration_s=1.5) for i in range(100)])
+                                               round_idx=0, sample_id=str(i), audio_duration_s=1.5, e2e_latency_s=.25) for i in range(100)])
                 else:
-                    result = dict(n=20, concurrency=c, out_tok_per_s=2, answers=["A"]*20, completion_tokens=[1]*20)
+                    result = dict(n=20, concurrency=c, out_tok_per_s=2, latencies_s=[.2]*20, answers=["A"]*20, completion_tokens=[1]*20)
                 (dirs[arm] / f"c{c}-w1.json").write_text(json.dumps(result))
                 source[c] = result
         report = suite["record_rows"]
@@ -95,30 +98,32 @@ def test_asr_replica_row_layout_and_labels():
         six.check_wave_fits(tuple(w for wave in six.WAVES for w in wave))   # all models in one wave cannot fit
 
 
-def test_vlstage_splits_image_cost_from_decode(tmp_path):
-    """vlstage against a stub whose latency is 0.05 s base + 0.2 s with an image + 0.01 s per output token."""
-    import os, subprocess, sys, threading, time
-    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-    d = tmp_path / "vl"; (d / "images").mkdir(parents=True)
-    (d / "images/a.jpg").write_bytes(b"\xff\xd8fake")
-    (d / "manifest.json").write_text(json.dumps([{"image": "a.jpg", "question": "Q?"}]))
-    class H(BaseHTTPRequestHandler):
-        def log_message(self, *a): pass
-        def do_POST(self):
-            b = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
-            img = any(x.get("type") == "image_url" for x in b["messages"][0]["content"])
-            time.sleep(0.05 + (0.2 if img else 0) + 0.01 * b["max_tokens"])
-            out = json.dumps({"choices": [{"message": {"content": "A"}}], "usage": {"completion_tokens": b["max_tokens"]}}).encode()
-            self.send_response(200); self.send_header("Content-Length", str(len(out))); self.end_headers(); self.wfile.write(out)
-    srv = ThreadingHTTPServer(("127.0.0.1", 0), H); threading.Thread(target=srv.serve_forever, daemon=True).start()
-    try:
-        out = tmp_path / "s.json"
-        r = subprocess.run([sys.executable, str(Path(__file__).resolve().parents[2] / "benchmarks/five/clients.py"), "vlstage",
-                            str(srv.server_port), str(d), "3", str(out)], capture_output=True, text=True, timeout=60,
-                           env=dict(os.environ, PROBE_TOKENS="8"))
-    finally:
-        srv.shutdown()
-    assert r.returncode == 0, r.stderr
-    s = json.load(open(out))
-    assert abs(s["image_cost_s"] - 0.2) < 0.05 and s["decode_tail_s"] > 0.04, s
-    assert 0 < s["image_share_of_request"] < 1 and s["max_latency_gain_if_image_cost_zero"] > 1
+def test_vlstage_splits_image_cost_from_decode(tmp_path, monkeypatch):
+    import httpx
+    import pytest
+    from types import SimpleNamespace
+    runpy.run_path(str(SUITE))
+    import clients
+
+    clock = 0.0
+    def transport(request):
+        nonlocal clock
+        assert request.url.path == "/v1/chat/completions"
+        body = json.loads(request.content)
+        image = any(part["type"] == "image_url" for part in body["messages"][0]["content"])
+        clock += .05 + (.2 if image else 0) + .01 * body["max_tokens"]
+        return httpx.Response(200, json={"choices": [{"message": {"content": "A"}}]})
+
+    client = httpx.Client(transport=httpx.MockTransport(transport))
+    monkeypatch.setattr(clients, "httpx", SimpleNamespace(Client=lambda **_: client))
+    monkeypatch.setattr(clients, "time", SimpleNamespace(perf_counter=lambda: clock))
+    monkeypatch.setattr(clients, "PROBE_TOKENS", 8)
+    (tmp_path / "images").mkdir()
+    (tmp_path / "images/a.jpg").write_bytes(b"sample")
+    (tmp_path / "manifest.json").write_text(json.dumps([{"image": "a.jpg", "question": "Q?"}]))
+    out = tmp_path / "timings.json"
+    clients.vlstage(8600, tmp_path, 3, out)
+    result = json.loads(out.read_text())
+    assert result["image_cost_s"] == pytest.approx(.2)
+    assert result["decode_tail_s"] == pytest.approx(.07)
+    assert result["max_latency_gain_if_image_cost_zero"] == pytest.approx(.33 / .13)

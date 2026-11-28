@@ -25,7 +25,7 @@ def test_six_plan_keeps_gpt_diagnostic_separate():
 @pytest.mark.parametrize(("diagnostic", "menu"), [(False, [1024, 8192]), (True, [8192])])
 def test_gpt_launch_and_greedy_gate(tmp_path, diagnostic, menu):
     suite = runpy.run_path(str(SUITE))
-    model = suite["GPT_PADDED"] if diagnostic else suite["WAVES"][1][2]
+    model = suite["GPT_PADDED"] if diagnostic else next(m for wave in suite["WAVES"] for m in wave if m.stock == "oss-U")
     from clients import CACHE_LENGTHS, cache_prompts
 
     places, configs = {}, []
@@ -50,7 +50,10 @@ def test_gpt_launch_and_greedy_gate(tmp_path, diagnostic, menu):
             result = dict(num_prompts=n, completed=n, failed=0, max_concurrency=c, total_input_tokens=n*1024,
                           total_output_tokens=n*256, output_throughput=10, median_tpot_ms=5, median_ttft_ms=8,
                           input_lens=[1024]*n, output_lens=[256]*n, generated_texts=["example"]*n)
-            (cwd / f"c{c}-w1.json").write_text(json.dumps(result))
+            result.update(ttfts=[0.010]*n, itls=[[0.250] for _ in range(n)])
+            for length in model.input_lengths:
+                result.update(input_lens=[length]*n, total_input_tokens=n*length)
+                (cwd / suite["window_file"](length, c, 1)).write_text(json.dumps(result))
         for conc in (1, 3):
             probe = dict(lengths=CACHE_LENGTHS, concurrency=conc, gen_tokens=32,
                          prompt_sha256=hashlib.sha256(json.dumps(cache_prompts()).encode()).hexdigest(),
@@ -58,14 +61,14 @@ def test_gpt_launch_and_greedy_gate(tmp_path, diagnostic, menu):
             (cwd / f"cache-c{conc}.json").write_text(json.dumps(probe))
     assert configs[0] == configs[1]
     rows = list(suite["record_rows"](model, places, {}, 1))
-    assert [r["ratio"] for r in rows] == [1.0, 1.0]
+    assert [r["ratio"] for r in rows] == [1.0] * len(rows)
     assert all(("diagnostic" in r["status"]) == diagnostic for r in rows)
     window = places[model.fork] / "c1-w1.json"
     original = window.read_text()
     changed = json.loads(original)
     changed["generated_texts"][0] += " mismatch"
     window.write_text(json.dumps(changed))
-    assert [r["ratio"] for r in suite["record_rows"](model, places, {}, 1)] == [None, 1.0]
+    assert [r["ratio"] for r in suite["record_rows"](model, places, {}, 1)] == [None] + [1.0] * (len(rows)-1)
     window.write_text(original)
     cache = places[model.fork] / "cache-c3.json"
     different = json.loads(cache.read_text())

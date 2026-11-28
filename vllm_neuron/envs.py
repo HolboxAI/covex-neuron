@@ -51,6 +51,7 @@ if TYPE_CHECKING:
     COVEX_VL_VISION_LN_IN_MLP: bool = False
     # COVEX: decode attention stops after the longest real context in the batch
     # (nkilib dynamic FA early exit). Off by default; Qwen3 and Llama 3 decode.
+    COVEX_LLAMA_FUSED_PAIRS: bool = False
     COVEX_DECODE_DYNAMIC_FA: bool = False
     # COVEX: Qwen3 decode (nkh == 1 path, BF16 KV) writes new K/V inside the attention kernel instead of index_put_.
     COVEX_QWEN3_INKERNEL_KV_WRITE: bool = False
@@ -345,6 +346,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "COVEX_ASR_ENCODER_LN_IN_MLP": lambda: (
         maybe_convert_bool(os.getenv("COVEX_ASR_ENCODER_LN_IN_MLP")) or False
     ),
+    "COVEX_LLAMA_FUSED_PAIRS": lambda: maybe_convert_bool(os.getenv("COVEX_LLAMA_FUSED_PAIRS")) or False,
     "COVEX_DECODE_DYNAMIC_FA": lambda: (
         maybe_convert_bool(os.getenv("COVEX_DECODE_DYNAMIC_FA")) or False
     ),
