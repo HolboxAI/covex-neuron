@@ -57,10 +57,11 @@ def vl(port, d, n, conc, out):
     asyncio.run(run_pool(2, 2, make))
     wall, lat, outs = asyncio.run(run_pool(n, conc, make))
     token_counts = [outs[i]["usage"]["completion_tokens"] for i in range(n)]
+    prompt_tokens = [outs[i]["usage"].get("prompt_tokens") for i in range(n)]   # exact text+image tokens (padding report)
     toks = sum(token_counts)
     answers = [outs[i]["choices"][0]["message"]["content"] for i in range(min(20, n))]
     json.dump(summary(n, conc, wall, lat, {"out_tok_per_s": round(toks / wall, 2), "answers": answers,
-               "completion_tokens": token_counts}), open(out, "w"))
+               "completion_tokens": token_counts, "prompt_tokens": prompt_tokens}), open(out, "w"))
 
 def vlstage(port, d, n, out):
     """Serial (c1) stage split for one VL arm: per image, the full request (image + question, max_tokens 1) and the same

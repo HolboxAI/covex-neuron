@@ -89,6 +89,17 @@ case "$ARM" in
     ARGS=("$M/Qwen3-VL-32B-Instruct" --served-model-name m --max-model-len 8192 --max-num-batched-tokens 8192
           --max-num-seqs 4 --tensor-parallel-size 4 --no-enable-prefix-caching
           ); CFG="{\"neuron_config\":{\"quantization\":\"bf16\",\"num_batched_tokens_buckets\":$VL_BUCKETS,\"num_seqs_buckets\":[4],\"on_device_sampling_config\":{\"all_greedy\":true}},\"encoder_neuron_config\":{\"num_encoder_input_buckets\":[2048],\"encoder_attention_block_size\":2048}}" ;;
+  vl8-U|vl8-Ub|vl8-C)  # Qwen3-VL-8B-Instruct BF16, TP4 = one chip per arm, identical config except prefill buckets:
+    #   U  = pinned upstream, recipe-style single 8192 prefill bucket (vanilla stock: every prompt padded to 8192)
+    #   Ub = pinned upstream with COVEX's buckets (tuned stock: attribution of the setting)
+    #   C  = fork with buckets chosen from the workload's real text+image token counts (sixdata/vl: p50 ~235, max ~1.4K)
+    case $ARM in vl8-U) CORES=${VL8_CORES:-0-3} ;; vl8-Ub) CORES=${VL8_CORES:-4-7} ;; vl8-C) CORES=${VL8_CORES:-8-11} ;; esac
+    VL_BUCKETS='[8192]'; case $ARM in vl8-Ub|vl8-C) VL_BUCKETS='[256,512,1024,2048,4096,8192]' ;; esac
+    # equal, conservative KV share in every arm (VL-32B c4 failed on a DMA-ring allocation with a 54K-token KV budget)
+    export VLLM_NEURON_KV_GMU_BUDGET_CAP_FRACTION=${VL8_CAP:-0.15}
+    ARGS=("$M/Qwen3-VL-8B-Instruct" --served-model-name m --max-model-len 8192 --max-num-batched-tokens 8192
+          --max-num-seqs 4 --tensor-parallel-size 4 --no-enable-prefix-caching
+          ); CFG="{\"neuron_config\":{\"quantization\":\"bf16\",\"num_batched_tokens_buckets\":$VL_BUCKETS,\"num_seqs_buckets\":[4],\"on_device_sampling_config\":{\"all_greedy\":true}},\"encoder_neuron_config\":{\"num_encoder_input_buckets\":[2048],\"encoder_attention_block_size\":2048}}" ;;
   oss-U|oss-P|oss-T|oss-U8k|oss-P8k)  # GPT-OSS-20B BF16. P omits padded tokens from prefill expert routing.
     CORES=56-63
     case $ARM in
@@ -114,7 +125,7 @@ case "$ARM" in
     esac ;;
   *) echo "unknown arm $ARM" >&2; exit 2 ;;
 esac
-case "$ARM" in vl-U|vl-Ub|oss-U|oss-U8k|llama-U|llama-E3) VLLM=("${UPSTREAM_PY:?upstream Python required}" -m vllm.entrypoints.cli.main) ;; esac
+case "$ARM" in vl-U|vl-Ub|vl8-U|vl8-Ub|oss-U|oss-U8k|llama-U|llama-E3) VLLM=("${UPSTREAM_PY:?upstream Python required}" -m vllm.entrypoints.cli.main) ;; esac
 if [ -n "${SUITE_PYTHON:-}" ]; then VLLM=("$SUITE_PYTHON" -m vllm.entrypoints.cli.main); fi
 CORES=${SUITE_CORES:-$CORES}
 # CPU mode runs on host CPUs; core ranges apply on Trainium and in CPU compile (compile-cache prefix).
