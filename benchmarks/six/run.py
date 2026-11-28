@@ -30,10 +30,13 @@ from itertools import product
 BENCH = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(BENCH / "five"))
 sys.path.insert(0, str(BENCH / "six"))
+from downloads import DRAFTER, load_outcomes, verify_checkpoint
 from gate import asr_level_ok, asr_quality_ok, bench_ok, count_ok, same_work
 
 UPSTREAM_COMMIT = "e16d424681c7ac6afa2d834b2255cbb12309ecaa"
 CLIENT = BENCH / "five/clients.py"
+MODEL_PINS = json.loads((BENCH / "six/model_pins.json").read_text())
+REPOS = {repo.split("/")[1]: repo for repo in MODEL_PINS}
 
 
 @dataclass(frozen=True)
@@ -254,6 +257,23 @@ def audio_inputs(obj, concurrency):
     return clips
 
 
+def eagle_acceptance(windows):
+    # vLLM 0.29 saves counter deltas from /metrics around each measured window.
+    drafts = proposed = accepted = 0
+    for i, obs in enumerate(windows, 1):
+        counts = [obs.get(k) for k in ("spec_decode_num_drafts", "spec_decode_draft_tokens", "spec_decode_accepted_tokens")]
+        if any(type(n) is not int for n in counts):
+            raise ValueError(f"EAGLE3 window {i}: missing speculation counters")
+        d, p, a = counts
+        if not (0 < d <= p <= 3*d and 0 <= a <= p):
+            raise ValueError(f"EAGLE3 window {i}: invalid speculation counters {counts}")
+        drafts += d
+        proposed += p
+        accepted += a
+    return dict(drafts=drafts, proposed_tokens=proposed, accepted_tokens=accepted,
+                acceptance_rate=accepted / proposed)
+
+
 def paired_rows(model, places, errors, windows):
     common = list(errors.values())
     if model.kind == "gen" and not common:
@@ -269,6 +289,7 @@ def paired_rows(model, places, errors, windows):
         except (OSError, ValueError) as exc:
             common.append(f"embedding isolation: {exc}")
     for length, c in product(model.input_lengths, model.loads):
+        acceptance = None
         rates = {}
         p90s = {}
         problems = list(common)
@@ -325,6 +346,13 @@ def paired_rows(model, places, errors, windows):
                     times.extend(values)
                 else:
                     p90s[arm] = {"request_ms": 1000 * sorted(times)[math.ceil(.9 * len(times)) - 1]}
+        if model.fork == "llama-E3" and len(observations[model.fork]) == windows:
+            try:
+                acceptance = eagle_acceptance(observations[model.fork])
+                if acceptance["accepted_tokens"] == 0:
+                    problems.append("EAGLE3 accepted zero draft tokens on this workload")
+            except ValueError as exc:
+                problems.append(str(exc))
         if model.folder == "Qwen3-32B" and any(v["ttft_ms"] > 2000 or v["tpot_ms"] > 50 for v in p90s.values()):
             problems.append("Qwen p90 exceeds 2000 ms TTFT or 50 ms TPOT")
         if not problems:
@@ -361,6 +389,7 @@ def paired_rows(model, places, errors, windows):
                             or outputs != f.get("generated_texts")):
                         problems.append("per-request lengths or measured greedy outputs differ or are missing")
         yield dict(model=model.folder, arm=model.fork, comparator=model.stock, concurrency=c, unit=model.unit,
+                   eagle3_acceptance=acceptance,
                    input_tokens=length if model.kind == "gen" else None, p90=p90s, stock=rates[model.stock],
                    covex=rates[model.fork], ratio=None if problems else rates[model.fork] / rates[model.stock],
                    status="; ".join(dict.fromkeys(problems)) or (
@@ -394,6 +423,8 @@ def record_rows(model, places, errors, windows):
         alternate_candidate = next(asr_control) if asr_control is not None else None
         row.update(stock_default=row["stock"], stock_tuned=alternative["covex"])
         row["p90"].update(alternative["p90"])
+        if model.tuned == "llama-E3":
+            row["eagle3_acceptance"] = alternative["eagle3_acceptance"]
         if alternative["ratio"] is None:
             row.update(ratio=None, status=f"{row['status']} | {model.tuned}: {alternative['status']}")
         elif row["stock"] is not None and alternative["covex"] > row["stock"]:
@@ -406,6 +437,11 @@ def record_rows(model, places, errors, windows):
 
 
 def write_summary(out, rows):
+    for row in rows:
+        repo = REPOS[row["model"]]
+        row.update(checkpoint=repo, revision=MODEL_PINS[repo])
+        if row["model"] == "Llama-3.1-8B-Instruct":
+            row.update(drafter=DRAFTER, drafter_revision=MODEL_PINS[DRAFTER])
     write_json(out / "results.json", rows)
     lines = ["| Model | Arm | Baseline | Input tokens | c | Unit | Stock | Tuned stock | COVEX | Ratio | p90 ms by arm (generation TTFT/TPOT, others request latency) | Status |",
              "|---|---|---|---:|---:|---|---:|---:|---:|---:|---|---|"]
@@ -419,6 +455,15 @@ def write_summary(out, rows):
         fields = [row["model"], row["arm"], row.get("comparator", "emb-U"), str(row.get("input_tokens") or "—"),
                   str(row["concurrency"]), row["unit"], *map(fmt, nums), times or "—", status]
         lines.append("| " + " | ".join(fields) + " |")
+    llama = [row for row in rows if row["model"] == "Llama-3.1-8B-Instruct"]
+    if llama:
+        lines.extend(["", f"Llama target for every arm: {llama[0]['checkpoint']}@{llama[0]['revision']}. "
+                      f"EAGLE3 drafter: {DRAFTER}@{MODEL_PINS[DRAFTER]}."])
+        for row in llama:
+            stats = row.get("eagle3_acceptance")
+            value = (f"{stats['accepted_tokens']}/{stats['proposed_tokens']} draft tokens "
+                     f"({stats['acceptance_rate']:.2%})" if stats else "unavailable")
+            lines.append(f"- c{row['concurrency']} EAGLE3 acceptance: {value}")
     (out / "RESULTS.md").write_text("\n".join(lines) + "\n")
 
 
@@ -436,11 +481,10 @@ for _w in WAVES:
     check_wave_fits(_w)
 
 
-def run_wave(wave, out, args, base, roots, prefixes):
+def run_wave(wave, out, args, base, roots, prefixes, downloads=None):
     models_dir = Path(base.get("MODELS_DIR", Path.home() / "models")).resolve()
     data = Path(base.get("SIX_DATA", Path.home() / "data/sixdata")).resolve()
     asr = Path(base["CLIENT_DIR"]) / "data"
-    revisions = {repo.split("/")[1]: rev for repo, rev in read_object(BENCH / "six/model_pins.json").items()}
     jobs, errors, places = {}, {}, {}
     with ThreadPoolExecutor(max_workers=8) as pool, ExitStack() as stack:
         ready = {}
@@ -470,18 +514,18 @@ def run_wave(wave, out, args, base, roots, prefixes):
                            TORCH_NEURONX_NEFF_CACHE_DIR=str(cache / arm / "neff"))
                 model_path = models_dir / model.folder
                 try:
-                    cfg = model_path / "config.json"
-                    if not cfg.is_file():
-                        raise ValueError(f"checkpoint missing: {cfg}")
-                    meta = model_path / ".cache/huggingface/download/config.json.metadata"
-                    rev = meta.read_text().splitlines()[0] if meta.is_file() else None
-                    if rev != revisions[model.folder]:
-                        raise ValueError(f"wrong or unverified checkpoint revision for {model.folder}: {rev}")
+                    repo = REPOS[model.folder]
+                    required = [(repo, model_path)]
                     if arm == "llama-E3":
-                        draft = Path(base.get("LLAMA_E3_DIR", models_dir / "Llama-3.1-8B-Instruct-speculator.eagle3"))
-                        if (draft / ".cache/huggingface/download/config.json.metadata").read_text().splitlines()[0] != revisions[draft.name]:
-                            raise ValueError("wrong EAGLE3 checkpoint revision")
-                    write_json(cwd / "settings.json", dict(model=str(model_path), revision=rev,
+                        draft_path = Path(base.get("LLAMA_E3_DIR", models_dir / DRAFTER.split("/")[1]))
+                        required.append((DRAFTER, draft_path))
+                    for dependency, path in required:
+                        if downloads is not None and downloads.get(dependency) != "ok":
+                            raise ValueError(f"{arm} skipped: {dependency} download: "
+                                             f"{downloads.get(dependency, 'missing verdict')}")
+                        verify_checkpoint(path, MODEL_PINS[dependency])
+                    cfg = model_path / "config.json"
+                    write_json(cwd / "settings.json", dict(model=str(model_path), checkpoint=repo, revision=MODEL_PINS[repo],
                                config_sha256=hashlib.sha256(cfg.read_bytes()).hexdigest(), python=interpreter,
                                cores=env["SUITE_CORES"], cpus=cpus, upstream=side == 0))
                     if model.kind == "asr":
@@ -615,6 +659,7 @@ def main():
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--plan", action="store_true")
     mode.add_argument("--out", type=Path)
+    parser.add_argument("--downloads", type=Path, help="download verdicts from this attempt (defaults to downloads.json beside the output directory if present)")
     parser.add_argument("--embedding-run", type=Path, help="local copy of a reviewed embedding attempt; reuse P4 and P8 vs upstream")
     parser.add_argument("--gpt-padded-diagnostic-only", action="store_true",
                         help="run only the GPT-OSS pair with forced 8192-token prefills; excluded from the six-model result")
@@ -638,6 +683,13 @@ def main():
                 print(f"wave {i}  {m.folder}: {' vs '.join(m.arms())}, TP{m.tp}, c{m.loads}, {m.unit}"
                       + (f", inputs {m.input_lengths}" if len(m.input_lengths) > 1 else ""))
         return 0
+    report_path = args.downloads or args.out.resolve().parent / "downloads.json"
+    downloads = None
+    if args.downloads is not None or report_path.exists():
+        try:
+            downloads = load_outcomes(report_path, MODEL_PINS)
+        except (OSError, ValueError) as exc:
+            parser.error(f"checkpoint setup: {exc}")
     needed = ("UPSTREAM_DIR", "UPSTREAM_PY", "FORK_PY")
     if not args.gpt_padded_diagnostic_only:
         needed += ("Q32_NKI_SRC", "LLAMA_NKI_SRC")
@@ -670,7 +722,7 @@ def main():
         if args.embedding_run and WAVES[0][1] in wave:
             rows.extend(import_embedding(args.embedding_run, args.windows, arm) for arm in ("emb-P4", "emb-P8"))
             wave = tuple(m for m in wave if m.kind != "emb")
-        rows.extend(run_wave(wave, out, args, base, roots, prefixes))
+        rows.extend(run_wave(wave, out, args, base, roots, prefixes, downloads))
         write_summary(out, rows)
     print((out / "RESULTS.md").read_text())
     return int(any(row["ratio"] is None for row in rows))

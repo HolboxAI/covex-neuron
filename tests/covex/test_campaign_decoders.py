@@ -28,10 +28,23 @@ def test_best_correct_upstream_and_latency(tmp_path):
                        input_lens=[1024]*n, output_lens=[256]*n, total_input_tokens=1024*n, total_output_tokens=256*n,
                        ttfts=[.10]*n, itls=[[1.0] for _ in range(n)], median_ttft_ms=100, median_tpot_ms=4,
                        generated_texts=["text"]*n)
+            if arm == model.tuned:
+                obs.update(spec_decode_num_drafts=50, spec_decode_draft_tokens=150, spec_decode_accepted_tokens=37)
             (folder / f"c{c}-w1.json").write_text(json.dumps(obs))
     def read():
         return list(suite["record_rows"](model, dirs, {}, 1))
     assert [(r["comparator"], r["ratio"]) for r in read()] == [(model.tuned, 1.5)]*2
+    suite["write_summary"](tmp_path, read())
+    assert "37/150" in (tmp_path / "RESULTS.md").read_text()
+    assert "unsloth/Llama-3.1-8B-Instruct@" in (tmp_path / "RESULTS.md").read_text()
+    path = dirs[model.tuned] / "c1-w1.json"
+    valid = json.loads(path.read_text())
+    for key, value in (("spec_decode_accepted_tokens", None), ("spec_decode_accepted_tokens", 0),
+                       ("spec_decode_draft_tokens", 30), ("spec_decode_accepted_tokens", 151),
+                       ("generated_texts", ["different"] * 8)):
+        path.write_text(json.dumps({**valid, key: value}))
+        assert [r["ratio"] for r in read()] == [None, 1.5]
+    path.write_text(json.dumps(valid))
     f = dirs[model.fork] / "c1-w1.json"
     changed = json.loads(f.read_text())
     changed["ttfts"][1] = .30
