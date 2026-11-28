@@ -35,7 +35,10 @@ def _backend(name, healthy=True):
                 self.close_connection = True
                 return
             self._send(200, json.dumps({"backend": name, "echo": body}).encode())
-    s = ThreadingHTTPServer(("127.0.0.1", 0), H); threading.Thread(target=s.serve_forever, daemon=True).start()
+    class Srv(ThreadingHTTPServer):
+        request_queue_size = 2048   # like vLLM's uvicorn backlog; the default 5 resets bursts on Linux (502 at the proxy)
+        daemon_threads = True
+    s = Srv(("127.0.0.1", 0), H); threading.Thread(target=s.serve_forever, daemon=True).start()
     return s
 
 
