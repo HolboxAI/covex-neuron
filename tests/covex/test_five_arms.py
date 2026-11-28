@@ -1727,10 +1727,23 @@ def test_emb_replay_payload_renders_and_caps(tmp_path):
     assert "COVEX_PACK_TRACE=1" in t
     assert '"diagnostic_only": True' in t and '"arms": ["offline-emb-P8"]' in t
     assert '"arms": ["emb-U", "emb-T", "emb-P4", "emb-P8"]' not in t
-    # the offline engine bypasses serve.sh, so it must carry serve.sh's runtime env (missing EFA skip failed 7cc42bb)
-    serve = (ROOT / "benchmarks/five/serve.sh").read_text()
-    for var in ("NEURON_SKIP_EFA_AFFINITY=1", "TORCH_DEVICE_BACKEND_AUTOLOAD=0", "NEURON_LIBTORCH_COMPILATION_TIMEOUT=3600",
-                "VLLM_NEURON_COMPILATION_TIMEOUT=3600", "VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=1200"):
-        assert var in serve and var in t, var
+    # Execute the rendered launch block with a probe in place of the expensive model.
+    # A bare assignment or a variable on the wrong side of sudo must fail this test.
+    launcher = t[t.index("cd ~/run && mkdir -p results logs"):t.index('echo "RUN_EXIT=')]
+    (tmp_path / "run").mkdir()
+    probe = tmp_path / "covex-neuron/benchmarks/emb/replay_pairs.py"
+    probe.parent.mkdir(parents=True)
+    probe.write_text("import json, os, pathlib, sys\n"
+                     "pathlib.Path('child.json').write_text(json.dumps([dict(os.environ), sys.argv]))\n")
+    expected = {"NEURON_SKIP_EFA_AFFINITY": "1", "TORCH_DEVICE_BACKEND_AUTOLOAD": "0",
+                "NEURON_LIBTORCH_COMPILATION_TIMEOUT": "3600", "VLLM_NEURON_COMPILATION_TIMEOUT": "3600",
+                "VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS": "1200", "NEURON_VISIBLE_DEVICES": "0-7",
+                "COVEX_PACK_TRACE": "1"}
+    env = {k: v for k, v in os.environ.items() if k not in expected}
+    subprocess.run(["bash", "-c", 'T() { "$@"; }\n' + launcher],
+                   env=dict(env, HOME=str(tmp_path)), check=True)
+    child, argv = json.loads((tmp_path / "run/child.json").read_text())
+    assert {k: child.get(k) for k in expected} == expected
+    assert argv[argv.index("--case-file") + 1] == str(probe.parent / "campaign_pair_case.json")
     m = re.search(r"^shutdown -h \+(\d+)", t, re.M)
     assert m and int(m.group(1)) * 8.60 / 60 <= 4.5

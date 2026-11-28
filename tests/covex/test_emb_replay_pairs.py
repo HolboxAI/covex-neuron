@@ -12,7 +12,9 @@ MODE = os.environ["STUB_MODE"]; LOG = os.environ["STUB_LOG"]; N = [0]
 class _O:
     def __init__(s, e, request_id): s.outputs = types.SimpleNamespace(embedding=e); s.request_id = request_id
 class LLM:
-    def __init__(s, **kw): pass
+    def __init__(s, **kw):
+        if MODE == "unicode_log":
+            with open(LOG, "a", encoding="utf-8") as f: f.write("▏" * 300 + "\n")
     def embed(s, prompts, use_tqdm=False):
         ids = []
         for _ in prompts:
@@ -20,6 +22,10 @@ class LLM:
         start = 0; mem = []
         for i, p in zip(ids, prompts):
             n = len(p.split()); mem.append({"req": i, "start": start, "tokens": n, "padded": n}); start += n
+        if MODE == "randomized":
+            for member in mem:
+                member["req"] += "-deadbeef"
+            mem.reverse()
         if MODE == "reorder":
             mem = mem[::-1]                                       # trace lists members in another order than submitted
         split = MODE == "split" and len(prompts) == 2
@@ -133,3 +139,23 @@ def test_replays_the_pinned_inputs_even_when_a_longer_group_exists():
     assert (prompts["A"], prompts["A_prime"], prompts["B"], length) == ("red sun", "blue sky", "gold moon", 2)
     with pytest.raises(ValueError, match="differs from the campaign"):
         pick(list(reversed(texts)), tokenizer, witness)
+
+def test_randomized_internal_ids_bind_vectors_to_the_right_slots(tmp_path):
+    rc, result = _run(tmp_path, "randomized")
+    assert rc == 0 and result["verdict"] == "invariant", result
+    for case in result["runs"]:
+        pos = case["order"].index("B")
+        assert case["layout"]["b_offset"] == (0 if pos == 0 else case["layout"]["members"][-1][2])
+
+
+def test_log_offsets_are_bytes_after_unicode_worker_output(tmp_path):
+    rc, result = _run(tmp_path, "unicode_log")
+    assert rc == 0 and result["packing_verified"], result
+
+
+def test_ambiguous_or_invalid_internal_ids_cannot_validate_a_step():
+    import runpy
+    layout = runpy.run_path(str(ROOT / "benchmarks/emb/replay_pairs.py"))["layout"]
+    for ids in (("0-abcdef12", "0-abcdef34"), ("0-notauuid", "1-12345678"), ("0-abcdef12", "9-12345678")):
+        members = [dict(req=req, start=i, tokens=1, padded=1) for i, req in enumerate(ids)]
+        assert layout([dict(members=members, packed=True, total_padded=128)], ["A", "B"], ["0", "1"]) is None

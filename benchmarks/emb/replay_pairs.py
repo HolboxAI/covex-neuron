@@ -66,10 +66,22 @@ def layout(steps, order, request_ids):
             or len(set(request_ids)) != len(order)):
         return None
     members = steps[0]["members"]
-    if len(members) != len(order) or {m["req"] for m in members} != set(request_ids):
+    if len(members) != len(order):
         return None
-    b_req = request_ids[order.index("B")]
-    b = next(m for m in members if m["req"] == b_req)
+    # vLLM 0.29 returns external IDs from embed(), but its workers normally log
+    # external_id + "-" + eight lowercase hex digits. Require a bijection for
+    # the whole step in a single mode. Never infer membership from batch order.
+    by_output = {m["req"]: m for m in members}
+    if set(by_output) != set(request_ids):
+        by_output = {}
+        for member in members:
+            external, _, suffix = member["req"].rpartition("-")
+            if not re.fullmatch("[0-9a-f]{8}", suffix) or external in by_output:
+                return None
+            by_output[external] = member
+        if set(by_output) != set(request_ids):
+            return None
+    b = by_output[request_ids[order.index("B")]]
     return {"b_req": b["req"], "b_offset": b["start"], "b_padded": b["padded"], "bucket": steps[0]["total_padded"],
             "members": [(m["req"], m["start"], m["tokens"], m["padded"]) for m in members]}
 
@@ -134,8 +146,10 @@ def main(argv=None):
             start = log.stat().st_size if log.exists() else 0
             outs = llm.embed([prompts[k] for k in order], use_tqdm=False)
             vectors.setdefault(name, []).append(list(outs[order.index("B")].outputs.embedding))
-            lay = layout(trace_steps(log.read_text(errors="replace")[start:]), order,
-                         [getattr(out, "request_id", None) for out in outs])
+            with log.open("rb") as stream:
+                stream.seek(start)
+                steps = trace_steps(stream.read().decode("utf-8", errors="replace"))
+            lay = layout(steps, order, [getattr(out, "request_id", None) for out in outs])
             runs.append({"case": name, "repeat": rep, "order": order, "layout": lay})
     why = []
     lay = {}
