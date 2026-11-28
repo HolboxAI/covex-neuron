@@ -120,3 +120,57 @@ def test_vl8_payload_renders_with_pins_and_cap(tmp_path):
     assert "UPSTREAM_PREFIX=$HOME/venv-upstream FORK_PREFIX=$V" in t
     m = re.search(r"^shutdown -h \+(\d+)", t, re.M)
     assert m and int(m.group(1)) * 8.60 / 60 <= 6.0
+
+
+def _write(tmp, overrides):
+    """vl8-U/Ub/C windows with all-'A' answers; overrides[arm] = dict of field -> value applied to every window."""
+    r, m = tmp / "r", tmp / "m"
+    r.mkdir(); m.mkdir()
+    for arm, tps in (("vl8-U", 10.0), ("vl8-Ub", 38.0), ("vl8-C", 40.0)):
+        for w in ["warm", 1, 2, 3]:
+            d = {"n": 40, "concurrency": 4, "wall_s": 1, "req_per_s": 1, "lat_p50_ms": 1, "lat_p90_ms": 2, "out_tok_per_s": tps,
+                 "answers": ["A"] * 40, "completion_tokens": [1] * 40, "prompt_tokens": [230] * 40}
+            d.update(overrides.get(arm, {}))
+            (r / f"{arm}-c4-w{w}.json").write_text(json.dumps(d))
+    return r, m
+
+
+def _summ(r, m, status=None):
+    cmd = [sys.executable, str(ROOT / "benchmarks/vl8/summarize.py"), str(r), str(m), "--arms", "vl8-U vl8-Ub vl8-C", "--windows", "3", "--n", "40"]
+    if status:
+        cmd += ["--status", str(status)]
+    return subprocess.run(cmd, capture_output=True, text=True)
+
+
+def test_vl8_tuned_attribution_requires_tuned_stock_to_be_correct(tmp_path):
+    """Astra: tuned stock wrong on every request still gave a 'complete' COVEX-vs-tuned ratio."""
+    r, m = _write(tmp_path, {"vl8-Ub": {"answers": ["B"] * 40}})
+    p = _summ(r, m)
+    row = next(l for l in p.stdout.splitlines() if l.startswith("| vl8-C vs vl8-Ub |"))
+    assert "| – |" in row and "vl8-Ub w1: answers differ from vanilla stock on 40/40" in row, row
+    assert next(l for l in p.stdout.splitlines() if l.startswith("| vl8-C vs vl8-U |")).split("|")[2].strip().endswith("x")
+
+
+def test_vl8_blank_answers_are_not_complete(tmp_path):
+    """Astra: all three arms returning blank answers with positive token counts were accepted."""
+    blank = {"answers": [""] * 40}
+    r, m = _write(tmp_path, {"vl8-U": blank, "vl8-Ub": blank, "vl8-C": blank})
+    p = _summ(r, m)
+    assert p.returncode == 1 and "40/40 blank answers" in p.stdout, p.stdout
+
+
+def test_vl8_failed_warmup_voids_the_arm(tmp_path):
+    """Astra: a failed warm-up was recorded under a generic status the per-arm gate did not read."""
+    r, m = _write(tmp_path, {})
+    st = tmp_path / "STATUS.tsv"
+    st.write_text("vl8-C\tbench-c4-wwarm\tFAILED rc=1\n")
+    p = _summ(r, m, st)
+    assert p.returncode == 1 and "failed step" in next(l for l in p.stdout.splitlines() if l.startswith("| vl8-C vs vl8-U |"))
+    st.write_text("bench\tc4-w2\tFAILED a client failed\n")       # unattributed window failure voids every comparison
+    p = _summ(r, m, st)
+    assert p.returncode == 1 and "a window failed" in p.stdout
+
+
+def test_vl8_run_records_per_arm_window_status():
+    s = (ROOT / "benchmarks/vl8/run.sh").read_text()
+    assert '[ $rc = 0 ] || status $a "bench-c4-w$w"' in s and "stage-probe" in s

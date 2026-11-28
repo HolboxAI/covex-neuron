@@ -31,13 +31,16 @@ if [ ${#exp[@]} -gt 0 ]; then
     status "$a" provenance "$st $(printf '%s' "$row" | cut -f3-)"; [ "$st" = PASS ] || unset "UP[$a]"; done
 fi
 scrape() { curl -sf --max-time 10 "http://127.0.0.1:${PORT[$1]}/metrics" > "$2" || : > "$2"; }
-P=(); for a in $ARMS; do up $a && { pin $a python3 $C vlstage ${PORT[$a]} "$D" 10 results/$a-stage.json > logs/$a.stage.log 2>&1 & P+=($!); }; done
-wait_all ${P[@]+"${P[@]}"} || status stage probe "FAILED a probe failed"
+P=(); for a in $ARMS; do up $a && { ( pin $a python3 $C vlstage ${PORT[$a]} "$D" 10 results/$a-stage.json > logs/$a.stage.log 2>&1 \
+  || status $a stage-probe "FAILED rc=$?" ) & P+=($!); }; done
+wait_all ${P[@]+"${P[@]}"}
 for w in warm $(seq 1 "$WINDOWS"); do P=()
   for a in $ARMS; do up $a || continue
     ( scrape $a metrics/$a-w$w.before.prom
       VL_ALL_ANSWERS=1 pin $a python3 $C vl ${PORT[$a]} "$D" "$N" 4 results/$a-c4-w$w.json > logs/$a-w$w.log 2>&1; rc=$?
-      scrape $a metrics/$a-w$w.after.prom; exit $rc ) & P+=($!); done
+      scrape $a metrics/$a-w$w.after.prom
+      # per-arm status (warm-up included): the summary's per-arm gate reads these rows
+      [ $rc = 0 ] || status $a "bench-c4-w$w" "FAILED rc=$rc"; exit $rc ) & P+=($!); done
   wait_all ${P[@]+"${P[@]}"} || status bench "c4-w$w" "FAILED a client failed"
 done
 for a in "${!SPID[@]}"; do stop_arm "${SPID[$a]}"; done

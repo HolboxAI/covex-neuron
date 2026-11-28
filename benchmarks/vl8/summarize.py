@@ -89,6 +89,22 @@ for arm, r in rows.items():
           f"{sp.get('image_cost_s', '–') if not isinstance(sp.get('image_cost_s'), float) else round(sp['image_cost_s'], 3)} | "
           f"{'; '.join(r['failed']) or ('complete' if r['complete'] else 'incomplete windows')} |")
 ref = rows.get("vl8-U")
+generic_fail = failed.get("bench", [])          # a failed window not attributed to one arm voids every comparison
+
+
+def answer_problems(side, ref, name):
+    for w in range(W):
+        xa, ra = side["answers_w"][w], ref["answers_w"][w]
+        if not isinstance(xa, list) or len(xa) != N or not isinstance(ra, list) or len(ra) != N:
+            return f"{name} w{w + 1}: answers not recorded for all {N} requests"
+        blank = sum(1 for t in xa if not isinstance(t, str) or not t.strip())
+        if blank:
+            return f"{name} w{w + 1}: {blank}/{N} blank answers"
+        if xa != ra:
+            return f"{name} w{w + 1}: answers differ from vanilla stock on {sum(p != q for p, q in zip(xa, ra))}/{N}"
+        if side["tokens_w"][w] != ref["tokens_w"][w]:
+            return f"{name} w{w + 1}: per-request output token counts differ from vanilla stock"
+    return ""
 incomplete = []
 print("\n## Short-answer VL TPS (single option letter per question)\n")
 print("| Comparison | Ratio | Status |\n|---|---|---|")
@@ -103,14 +119,14 @@ for arm, base in (("vl8-C", "vl8-U"), ("vl8-C", "vl8-Ub"), ("vl8-Ub", "vl8-U")):
         if x["failed"] or b["failed"]:
             why.append("failed step")
         if ref:
-            for w in range(W):
-                xa, ra = x["answers_w"][w], ref["answers_w"][w]
-                if not isinstance(xa, list) or len(xa) != N or not isinstance(ra, list) or len(ra) != N:
-                    why.append(f"w{w + 1}: answers not recorded for all {N} requests"); break
-                if xa != ra:
-                    why.append(f"w{w + 1}: answers differ from vanilla stock on {sum(p != q for p, q in zip(xa, ra))}/{N}"); break
-                if x["tokens_w"][w] != ref["tokens_w"][w]:
-                    why.append(f"w{w + 1}: per-request output token counts differ from vanilla stock"); break
+            # BOTH arms of every comparison (an attribution ratio vs tuned stock too) must reproduce vanilla's answers
+            # and token counts in every window, and every answer must be a real, non-blank reply
+            for side, arm_name in ((x, arm), (b, base)):
+                bad = answer_problems(side, ref, arm_name)
+                if bad:
+                    why.append(bad)
+        if generic_fail:
+            why.append("a window failed: " + "; ".join(generic_fail))
         if x["p90"] is None or b["p90"] is None:
             why.append("p90 latency missing")
         elif x["p90"] > P90_TOL * b["p90"]:
