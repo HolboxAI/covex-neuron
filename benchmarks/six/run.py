@@ -67,6 +67,12 @@ WAVES = (
      Model("gpt-oss-20b", "oss-U", "oss-P", "gen", 8, (1, 4), "output tok/s", input_lengths=(1024, 1536))),
 )
 
+# The follow-up repeats ASR and VL with a matched upstream control for each configuration.
+ASR_TP8, ASR_REPLICAS, VL, _ = WAVES[1]
+TUNED_WAVES = (WAVES[0], (replace(ASR_TP8, tuned="asr-Ut"),
+                           replace(ASR_REPLICAS, tuned="asr-U2t"),
+                           replace(VL, tuned="vl-Ub", fork="vl-Cb")))
+
 GPT_PADDED = Model("gpt-oss-20b", "oss-U8k", "oss-P8k", "gen", 8, (1, 4), "output tok/s")
 
 
@@ -433,7 +439,11 @@ def record_rows(model, places, errors, windows):
         yield from map(latency_gate, candidate)
         return
     control = against(model.stock, model.tuned)
+    # WER tolerances are not transitive. Compare the actual transcripts/metrics for
+    # the tuned and fork arms before attributing a throughput difference to code.
+    matched_asr = against(model.tuned, model.fork) if model.kind == "asr" else None
     for row, alternative in zip(candidate, control, strict=True):
+        matched = next(matched_asr) if matched_asr is not None else None
         row.update(stock_default=row["stock"], stock_tuned=alternative["covex"],
                    tuned_comparator=model.tuned, ratio_vs_tuned=None,
                    tuned_status=alternative["status"])
@@ -442,7 +452,7 @@ def record_rows(model, places, errors, windows):
             row["eagle3_acceptance"] = alternative["eagle3_acceptance"]
         row = latency_gate(row)
         if row["ratio"] is not None and alternative["ratio"] is not None:
-            tuned = latency_gate({**row, "ratio": row["covex"] / alternative["covex"],
+            tuned = latency_gate(matched if matched is not None else {**row, "ratio": row["covex"] / alternative["covex"],
                                   "stock": alternative["covex"], "comparator": model.tuned,
                                   "status": "OK"})
             row["ratio_vs_tuned"] = tuned["ratio"]
@@ -483,18 +493,33 @@ def write_summary(out, rows):
     (out / "RESULTS.md").write_text("\n".join(lines) + "\n")
 
 
+def wave_placements(wave):
+    """Map each arm to its first logical core, visible core count and host CPU range."""
+    arms = [(arm, m.tp * m.replicas) for m in wave for arm in m.arms()]
+    # Preserve the historical CPU/core assignments for the original campaign.
+    compact = len(arms) > 8
+    if any(width not in (4, 8) for _, width in arms):
+        raise ValueError("each arm must occupy one or two whole chips")
+    if len({arm for arm, _ in arms}) != len(arms):
+        raise ValueError("duplicate arm in campaign wave")
+    required = sum(width if compact else 8 for _, width in arms)
+    if required > 64:
+        raise ValueError(f"wave needs {required / 8:g} chip pairs; the host has 8")
+
+    placements = {}
+    core = 0
+    # Place dual-chip arms first so TP8 and replica pairs start on a pair boundary.
+    if compact:
+        arms.sort(key=lambda item: -item[1])
+    for arm, width in arms:
+        reserved = width if compact else 8
+        placements[arm] = core, width, f"{3*core}-{3*(core+reserved)-1}"
+        core += reserved
+    return placements
+
+
 def check_wave_fits(wave):
-    """One chip pair (8 logical cores) and 24 vCPUs per arm: at most 8 arms per trn2.48xlarge."""
-    arms = sum(len(model.arms()) for model in wave)
-    if arms > 8:
-        raise ValueError(f"wave of {len(wave)} models needs {arms} chip pairs; the host has 8")
-    for m in wave:
-        if m.tp * m.replicas > 8:
-            raise ValueError(f"{m.folder}: {m.replicas} x TP{m.tp} does not fit one chip pair")
-
-
-for _w in WAVES:
-    check_wave_fits(_w)
+    wave_placements(wave)
 
 
 def run_wave(wave, out, args, base, roots, prefixes, downloads=None):
@@ -502,18 +527,16 @@ def run_wave(wave, out, args, base, roots, prefixes, downloads=None):
     data = Path(base.get("SIX_DATA", Path.home() / "data/sixdata")).resolve()
     asr = Path(base["CLIENT_DIR"]) / "data"
     jobs, errors, places = {}, {}, {}
-    with ThreadPoolExecutor(max_workers=8) as pool, ExitStack() as stack:
+    placements = wave_placements(wave)
+    with ThreadPoolExecutor(max_workers=len(placements)) as pool, ExitStack() as stack:
         ready = {}
         slot = -1
         for model in wave:
             for arm in model.arms():
                 slot += 1
-                if slot >= 8:
-                    raise ValueError("campaign wave exceeds eight chip pairs")
                 side = int(arm == model.fork)
                 port = 8600 + slot
-                # 8 arm slots per wave (16 chips): 24 host vCPUs each fill the 192-vCPU host exactly
-                cpus = f"{24*slot}-{24*slot+23}"
+                core, width, cpus = placements[arm]
                 cwd = out / arm
                 cwd.mkdir()
                 places[arm] = cwd
@@ -522,7 +545,7 @@ def run_wave(wave, out, args, base, roots, prefixes, downloads=None):
                 cache = cwd / "cache"
                 interpreter = base["UPSTREAM_PY" if side == 0 else "FORK_PY"]
                 env = dict(base, SUITE_PYTHON=interpreter, SUITE_CPUS=cpus,
-                           SUITE_CORES=f"{8*slot}-{8*slot+model.tp*model.replicas-1}",
+                           SUITE_CORES=f"{core}-{core+width-1}",
                            MODELS_DIR=str(models_dir), MODEL_DIR=str(models_dir / model.folder),
                            COVEX_ARM=arm, COVEX_PROVENANCE_DIR=str(prov), ARM_CACHE_BASE=str(cache),
                            PYTHONPATH=str(BENCH / "provenance"), SOLO="1", ROUNDS="1", EMB_ALL_VECTORS="1",
@@ -552,7 +575,7 @@ def run_wave(wave, out, args, base, roots, prefixes, downloads=None):
                             raise ValueError("prepare ASR benchmark client at 4ce1ddb before starting the suite")
                         label = ASR_LABELS[arm]
                         script = "asr/serve_replicas.sh" if model.replicas > 1 else "asr/serve.sh"
-                        argv = [BENCH / script, label, str(slot), str(port)]
+                        argv = [BENCH / script, label, str(core // 8), str(port)]
                     else:
                         label = arm
                         argv = [BENCH / "five/serve.sh", arm, str(port)]
@@ -609,8 +632,8 @@ def run_wave(wave, out, args, base, roots, prefixes, downloads=None):
         errors["emb-P8t"] = isolation_error
     rows = []
     for model in wave:
-        if model.kind == "asr":
-            # The two stock layouts already ran in this wave on equal chip reservations.
+        if model.kind == "asr" and not model.tuned:
+            # Legacy plan uses the other stock layout when no matched tuned arm was requested.
             alternate = next(m.stock for m in wave if m.kind == "asr" and m.stock != model.stock)
             model = replace(model, tuned=alternate)
         arm_errors = {a: errors[a] for a in model.arms() if a in errors}
@@ -675,9 +698,12 @@ def main():
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--plan", action="store_true")
     mode.add_argument("--out", type=Path)
+    mode.add_argument("--print-pins", action="store_true", help="print the checkpoint pins needed by the selected plan")
     parser.add_argument("--downloads", type=Path, help="download verdicts from this attempt (defaults to downloads.json beside the output directory if present)")
     parser.add_argument("--embedding-run", type=Path, help="local copy of a reviewed embedding attempt; reuse P4 and P8 vs upstream")
-    parser.add_argument("--gpt-padded-diagnostic-only", action="store_true",
+    layout = parser.add_mutually_exclusive_group()
+    layout.add_argument("--tuned-followup", action="store_true", help="repeat the campaign with matched ASR and VL controls, omitting GPT-OSS")
+    layout.add_argument("--gpt-padded-diagnostic-only", action="store_true",
                         help="run only the GPT-OSS pair with forced 8192-token prefills; excluded from the six-model result")
     parser.add_argument("--windows", type=int, default=3)
     parser.add_argument("--ready-seconds", type=int, default=1800)
@@ -688,6 +714,15 @@ def main():
     if args.gpt_padded_diagnostic_only and args.embedding_run:
         parser.error("the isolated GPT diagnostic cannot import an embedding run")
     waves = ((GPT_PADDED,),) if args.gpt_padded_diagnostic_only else WAVES
+    if args.tuned_followup:
+        waves = TUNED_WAVES
+    repos = {REPOS[m.folder] for wave in waves for m in wave}
+    if any("llama-E3" in m.arms() for wave in waves for m in wave):
+        repos.add(DRAFTER)
+    pins = {repo: MODEL_PINS[repo] for repo in sorted(repos)}
+    if args.print_pins:
+        print(json.dumps(pins, indent=2))
+        return 0
     if args.plan:
         if args.gpt_padded_diagnostic_only:
             print("GPT-OSS diagnostic only (forced 8192-token prefill)")
@@ -703,7 +738,7 @@ def main():
     downloads = None
     if args.downloads is not None or report_path.exists():
         try:
-            downloads = load_outcomes(report_path, MODEL_PINS)
+            downloads = load_outcomes(report_path, pins)
         except (OSError, ValueError) as exc:
             parser.error(f"checkpoint setup: {exc}")
     needed = ("UPSTREAM_DIR", "UPSTREAM_PY", "FORK_PY")
@@ -731,7 +766,7 @@ def main():
     base["PATH"] = str(Path(base["FORK_PY"]).parent) + os.pathsep + base["PATH"]
     write_json(out / "manifest.json", dict(upstream=UPSTREAM_COMMIT, fork=git_head(roots[1]),
                windows=args.windows, python_prefixes=prefixes, embedding_run=str(args.embedding_run) if args.embedding_run else None,
-               gpt_padded_diagnostic_only=args.gpt_padded_diagnostic_only,
+               gpt_padded_diagnostic_only=args.gpt_padded_diagnostic_only, tuned_followup=args.tuned_followup,
                waves=[[vars(m) for m in wave] for wave in waves]))
     rows = []
     for wave in waves:
@@ -741,7 +776,9 @@ def main():
         rows.extend(run_wave(wave, out, args, base, roots, prefixes, downloads))
         write_summary(out, rows)
     print((out / "RESULTS.md").read_text())
-    return int(any(row["ratio"] is None for row in rows))
+    required_tuned = {m.fork for wave in waves for m in wave if args.tuned_followup and m.tuned}
+    return int(any(row["ratio"] is None or
+                   (row["arm"] in required_tuned and row.get("ratio_vs_tuned") is None) for row in rows))
 
 
 if __name__ == "__main__":

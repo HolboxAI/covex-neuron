@@ -67,8 +67,8 @@ tar xzf asr_data.tgz -C "$CLIENT_DIR"
 "$UPSTREAM_PY" -m pip install -q httpx soundfile
 "$FORK_PY" -m pip freeze > "$CAMPAIGN_OUT/fork-packages.txt"
 "$UPSTREAM_PY" -m pip freeze > "$CAMPAIGN_OUT/upstream-packages.txt"
-cp fork/benchmarks/six/model_pins.json "$CAMPAIGN_OUT/"
+"$FORK_PY" fork/benchmarks/six/run.py --tuned-followup --print-pins > "$CAMPAIGN_OUT/model_pins.json"
 report="$CAMPAIGN_OUT/downloads.json"
 "$FORK_PY" fork/benchmarks/six/downloads.py --pins "$CAMPAIGN_OUT/model_pins.json" --model-dir "$MODELS_DIR" --report "$report"
-"$FORK_PY" fork/benchmarks/six/run.py --out "$CAMPAIGN_OUT/results" --downloads "$report"
+"$FORK_PY" fork/benchmarks/six/run.py --tuned-followup --out "$CAMPAIGN_OUT/results" --downloads "$report"
 BOOT

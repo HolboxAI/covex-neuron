@@ -114,7 +114,7 @@ case "$ARM" in
     esac ;;
   *) echo "unknown arm $ARM" >&2; exit 2 ;;
 esac
-case "$ARM" in vl-U|oss-U|oss-U8k|llama-U|llama-E3) VLLM=("${UPSTREAM_PY:?upstream Python required}" -m vllm.entrypoints.cli.main) ;; esac
+case "$ARM" in vl-U|vl-Ub|oss-U|oss-U8k|llama-U|llama-E3) VLLM=("${UPSTREAM_PY:?upstream Python required}" -m vllm.entrypoints.cli.main) ;; esac
 if [ -n "${SUITE_PYTHON:-}" ]; then VLLM=("$SUITE_PYTHON" -m vllm.entrypoints.cli.main); fi
 CORES=${SUITE_CORES:-$CORES}
 # CPU mode runs on host CPUs; core ranges apply on Trainium and in CPU compile (compile-cache prefix).
