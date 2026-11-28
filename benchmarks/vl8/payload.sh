@@ -1,7 +1,7 @@
 #!/bin/bash
 # Qwen3-VL-8B pass 1 payload: vanilla stock vs tuned stock vs COVEX buckets, one chip per arm, c4 (trn2.48xlarge Spot, Neuron DLAMI SDK 2.33.1). Rendered by render_payload.sh:
 # every double-at placeholder is replaced by an exact pin; the renderer refuses output with any left.
-shutdown -h +40   # hard stop: 40 min x $8.60/h Spot = $5.73
+shutdown -h +65   # hard stop: 65 min x $8.60/h Spot = $9.32 (run 1: setup alone took 20 min, compile needs >5)
 BOOT=$(date +%s)
 B=covex-neuron-runs-992382417943; R=us-east-2
 # IMDSv2 (token) with a UUID fallback: the prefix must be unique even when metadata is unavailable

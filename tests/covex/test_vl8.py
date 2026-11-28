@@ -113,14 +113,14 @@ def test_vl8_payload_renders_with_pins_and_cap(tmp_path):
     out = tmp_path / "p.sh"
     pins = ["a" * 40, "b" * 40, "c" * 40]
     r = subprocess.run(["bash", str(ROOT / "benchmarks/q32/render_payload.sh"), *pins, str(out), "", "3"],
-                       env=dict(os.environ, TEMPLATE=str(ROOT / "benchmarks/vl8/payload.sh"), READY_MIN="25"), capture_output=True, text=True)
+                       env=dict(os.environ, TEMPLATE=str(ROOT / "benchmarks/vl8/payload.sh"), READY_MIN="45"), capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
     t = out.read_text()
     assert "@@" not in t and "benchmarks/vl8/run.sh" in t and 'P="vl8/$RUN_ID"' in t
     assert "T hf download Qwen/Qwen3-VL-8B-Instruct --revision " + "c" * 40 in t and "sixdata/vl/manifest.json" in t
     assert "UPSTREAM_PREFIX=$HOME/venv-upstream FORK_PREFIX=$V" in t
     m = re.search(r"^shutdown -h \+(\d+)", t, re.M)
-    assert m and int(m.group(1)) * 8.60 / 60 <= 6.0
+    assert m and int(m.group(1)) * 8.60 / 60 <= 9.5
 
 
 def _write(tmp, overrides):
