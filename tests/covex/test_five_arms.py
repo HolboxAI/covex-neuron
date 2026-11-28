@@ -1727,5 +1727,10 @@ def test_emb_replay_payload_renders_and_caps(tmp_path):
     assert "COVEX_PACK_TRACE=1" in t
     assert '"diagnostic_only": True' in t and '"arms": ["offline-emb-P8"]' in t
     assert '"arms": ["emb-U", "emb-T", "emb-P4", "emb-P8"]' not in t
+    # the offline engine bypasses serve.sh, so it must carry serve.sh's runtime env (missing EFA skip failed 7cc42bb)
+    serve = (ROOT / "benchmarks/five/serve.sh").read_text()
+    for var in ("NEURON_SKIP_EFA_AFFINITY=1", "TORCH_DEVICE_BACKEND_AUTOLOAD=0", "NEURON_LIBTORCH_COMPILATION_TIMEOUT=3600",
+                "VLLM_NEURON_COMPILATION_TIMEOUT=3600", "VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=1200"):
+        assert var in serve and var in t, var
     m = re.search(r"^shutdown -h \+(\d+)", t, re.M)
     assert m and int(m.group(1)) * 8.60 / 60 <= 4.5

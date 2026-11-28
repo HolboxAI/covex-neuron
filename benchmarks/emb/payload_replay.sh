@@ -61,6 +61,8 @@ aws s3 sync "\$1" "s3://$B/$P/evidence/\$2/" --region $R --only-show-errors
 UP
 chmod +x ~/upload_evidence.sh
 cd ~/run && mkdir -p results logs && export NEURON_VISIBLE_DEVICES=0-7 COVEX_PACK_TRACE=1 TORCH_DEVICE_BACKEND_AUTOLOAD=0 \
+  NEURON_LIBTORCH_COMPILATION_TIMEOUT=3600 NEURON_SKIP_EFA_AFFINITY=1 VLLM_NEURON_COMPILATION_TIMEOUT=3600 \
+  VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=1200 \
   VLLM_NEURON_RESERVED_HEADROOM_GIB=4 && T python3 ~/covex-neuron/benchmarks/emb/replay_pairs.py --model ~/models/Qwen3-Embedding-8B \
   --case-file ~/covex-neuron/benchmarks/emb/campaign_pair_case.json \
   --dataset ~/data/sixdata/embed/t64.jsonl --tokenizer ~/models/Qwen3-Embedding-8B --packing 8 --repeat 3 \
