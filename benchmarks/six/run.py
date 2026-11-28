@@ -56,12 +56,12 @@ class Model:
         return (self.stock, self.tuned, self.fork) if self.tuned else (self.stock, self.fork)
 
 
-ASR_LABELS = {"asr-U": "S2", "asr-DMB": "DMB", "asr-U2": "R4", "asr-R": "RDMB"}
+ASR_LABELS = {"asr-U": "S2", "asr-B8": "B8", "asr-U2": "R4", "asr-R": "RB"}
 WAVES = (
     (Model("Qwen3-32B", "q32-U", "q32-F4", "gen", 8, (1, 8), "output tok/s", tuned="q32-Ut"),
      Model("Qwen3-Embedding-8B", "emb-U", "emb-P8t", "emb", 8, (32,), "sequences/s"),
      Model("Llama-3.1-8B-Instruct", "llama-U", "llama-K2", "gen", 8, (1, 8), "output tok/s", tuned="llama-E3")),
-    (Model("Qwen3-ASR-1.7B", "asr-U", "asr-DMB", "asr", 8, (1, 8), "audio seconds/s"),
+    (Model("Qwen3-ASR-1.7B", "asr-U", "asr-B8", "asr", 8, (1, 8), "audio seconds/s"),
      Model("Qwen3-ASR-1.7B", "asr-U2", "asr-R", "asr", 4, (1, 8), "audio seconds/s", replicas=2),
      Model("Qwen3-VL-32B-Instruct", "vl-U", "vl-C", "vl", 4, (4,), "output tok/s"),
      Model("gpt-oss-20b", "oss-U", "oss-P", "gen", 8, (1, 4), "output tok/s", input_lengths=(1024, 1536))),
@@ -99,6 +99,8 @@ def service(argv, cwd, env, stream):
             os.killpg(process.pid, signal.SIGTERM)
             try:
                 process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                pass   # campaign 3fd284f: a slow stop raised here and lost every wave-2 row; SIGKILL below ends it
             finally:
                 try:
                     os.killpg(process.pid, signal.SIGKILL)
@@ -131,6 +133,7 @@ def measure(model, arm, port, cwd, env, model_path, data, windows, cpus, limit):
     def call(args):
         command(["taskset", "-c", cpus, *map(str, args)], cwd, env, cwd / "measure.log", limit)
 
+    replay_failure = None
     if model.kind == "gen":
         for c in (1, 3):
             call([sys.executable, CLIENT, "cachecheck", port, f"cache-c{c}.json", c, 32])
@@ -139,8 +142,13 @@ def measure(model, arm, port, cwd, env, model_path, data, windows, cpus, limit):
     if model.folder == "Qwen3-32B":
         url = f"http://127.0.0.1:{port}"
         for name in (("replay", "repeat") if arm == "q32-U" else ("replay",)):
-            call([env["FORK_PY"], BENCH / "q32/replay.py", "run", "--base-url", url, "--model", "m",
-                  "--out", f"{name}.json", "--batch", "8", "--tokens", "32", "--seed", "1"])
+            try:
+                call([env["FORK_PY"], BENCH / "q32/replay.py", "run", "--base-url", url, "--model", "m",
+                      "--out", f"{name}.json", "--batch", "8", "--tokens", "32", "--seed", "1"])
+            except subprocess.CalledProcessError as exc:
+                # A failed logprob request can coexist with a healthy token-only server.
+                # Preserve the failed gate and collect the independent needle and timing evidence.
+                replay_failure = exc
         try:
             call([env["FORK_PY"], BENCH / "q32/needles.py", "--base-url", url, "--model", "m",
                   "--tokenizer", model_path, "--lengths", "8204,9644,24044", "--out", "needles.json"])
@@ -167,6 +175,14 @@ def measure(model, arm, port, cwd, env, model_path, data, windows, cpus, limit):
                 label = f"{arm}-c{c}-w{w}"
                 call(["bash", BENCH / "asr/bench.sh", label, port, 100, c])
                 (cwd / "results" / f"{label}.json").rename(cwd / dest)
+                if model.replicas > 1:   # per-replica requests, audio bytes and busy seconds (cumulative; diff windows)
+                    try:
+                        with urllib.request.urlopen(f"http://127.0.0.1:{port}/proxy_stats", timeout=10) as r:
+                            (cwd / f"proxy-stats-c{c}-w{w}.json").write_bytes(r.read())
+                    except (OSError, urllib.error.URLError) as exc:
+                        (cwd / f"proxy-stats-c{c}-w{w}.json").write_text(json.dumps({"error": str(exc)}))
+    if replay_failure is not None:
+        raise replay_failure
 
 
 def check_embedding_isolation(jobs, data, timeout):
@@ -417,23 +433,21 @@ def record_rows(model, places, errors, windows):
         yield from map(latency_gate, candidate)
         return
     control = against(model.stock, model.tuned)
-    # ASR field quality is relative to the selected upstream layout, including its WER.
-    asr_control = against(model.tuned, model.fork) if model.kind == "asr" else None
     for row, alternative in zip(candidate, control, strict=True):
-        alternate_candidate = next(asr_control) if asr_control is not None else None
-        row.update(stock_default=row["stock"], stock_tuned=alternative["covex"])
+        row.update(stock_default=row["stock"], stock_tuned=alternative["covex"],
+                   tuned_comparator=model.tuned, ratio_vs_tuned=None,
+                   tuned_status=alternative["status"])
         row["p90"].update(alternative["p90"])
         if model.tuned == "llama-E3":
             row["eagle3_acceptance"] = alternative["eagle3_acceptance"]
-        if alternative["ratio"] is None:
-            row.update(ratio=None, status=f"{row['status']} | {model.tuned}: {alternative['status']}")
-        elif row["stock"] is not None and alternative["covex"] > row["stock"]:
-            row.update(stock=alternative["covex"], comparator=model.tuned)
-            if alternate_candidate is not None and alternate_candidate["ratio"] is None:
-                row.update(ratio=None, status=alternate_candidate["status"])
-            elif row["ratio"] is not None:
-                row["ratio"] = row["covex"] / row["stock"]
-        yield latency_gate(row)
+        row = latency_gate(row)
+        if row["ratio"] is not None and alternative["ratio"] is not None:
+            tuned = latency_gate({**row, "ratio": row["covex"] / alternative["covex"],
+                                  "stock": alternative["covex"], "comparator": model.tuned,
+                                  "status": "OK"})
+            row["ratio_vs_tuned"] = tuned["ratio"]
+            row["tuned_status"] = tuned["status"]
+        yield row
 
 
 def write_summary(out, rows):
@@ -443,17 +457,19 @@ def write_summary(out, rows):
         if row["model"] == "Llama-3.1-8B-Instruct":
             row.update(drafter=DRAFTER, drafter_revision=MODEL_PINS[DRAFTER])
     write_json(out / "results.json", rows)
-    lines = ["| Model | Arm | Baseline | Input tokens | c | Unit | Stock | Tuned stock | COVEX | Ratio | p90 ms by arm (generation TTFT/TPOT, others request latency) | Status |",
-             "|---|---|---|---:|---:|---|---:|---:|---:|---:|---|---|"]
+    lines = ["| Model | Arm | Baseline | Input tokens | c | Unit | Stock | Tuned stock | COVEX | Ratio vs stock | Ratio vs tuned | p90 ms by arm (generation TTFT/TPOT, others request latency) | Status | Tuned status |",
+             "|---|---|---|---:|---:|---|---:|---:|---:|---:|---:|---|---|---|"]
     def fmt(value):
         return "—" if value is None else f"{value:.2f}"
     for row in rows:
         status = row["status"].replace("|", "/").replace("\n", " ")
         times = ", ".join(f"{a} {d['request_ms']:.1f}" if "request_ms" in d else
                           f"{a} {d['ttft_ms']:.1f}/{d['tpot_ms']:.1f}" for a, d in row.get("p90", {}).items())
-        nums = [row.get("stock_default", row["stock"]), row.get("stock_tuned"), row["covex"], row["ratio"]]
+        nums = [row.get("stock_default", row["stock"]), row.get("stock_tuned"), row["covex"],
+                row["ratio"], row.get("ratio_vs_tuned")]
         fields = [row["model"], row["arm"], row.get("comparator", "emb-U"), str(row.get("input_tokens") or "—"),
-                  str(row["concurrency"]), row["unit"], *map(fmt, nums), times or "—", status]
+                  str(row["concurrency"]), row["unit"], *map(fmt, nums), times or "—", status,
+                  row.get("tuned_status", "—").replace("|", "/").replace("\n", " ")]
         lines.append("| " + " | ".join(fields) + " |")
     llama = [row for row in rows if row["model"] == "Llama-3.1-8B-Instruct"]
     if llama:

@@ -1714,3 +1714,18 @@ def test_emb_diag_isolation_runs_and_verifies_packed_steps(tmp_path):
     res = (run / "RESULTS.md").read_text()
     assert "## Isolation diagnostic" in res and "packed_step_verified=True" in res, res
     assert r.returncode == 0 and "RUN OK" in r.stdout, r.stdout[-2000:]
+
+
+def test_emb_replay_payload_renders_and_caps(tmp_path):
+    out = tmp_path / "p.sh"
+    r = subprocess.run(["bash", str(ROOT / "benchmarks/q32/render_payload.sh"), *PINS, str(out), "", "3"],
+                       env=dict(os.environ, TEMPLATE=str(ROOT / "benchmarks/emb/payload_replay.sh"), READY_MIN="12"),
+                       capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    t = out.read_text()
+    assert "@@" not in t and "benchmarks/emb/replay_pairs.py" in t and "--log logs/replay.log" in t and 'P="emb-replay/$RUN_ID"' in t
+    assert "COVEX_PACK_TRACE=1" in t
+    assert '"diagnostic_only": True' in t and '"arms": ["offline-emb-P8"]' in t
+    assert '"arms": ["emb-U", "emb-T", "emb-P4", "emb-P8"]' not in t
+    m = re.search(r"^shutdown -h \+(\d+)", t, re.M)
+    assert m and int(m.group(1)) * 8.60 / 60 <= 4.5

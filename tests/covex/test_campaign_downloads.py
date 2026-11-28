@@ -60,7 +60,7 @@ def test_partial_and_failed_downloads_never_spawn_an_arm(tmp_path, monkeypatch, 
                           suite.load_outcomes(path, pins))
     assert attempted == ["llama-U", "llama-K2"]
     assert all(row["ratio"] is None for row in rows)
-    assert all("interrupted transfer" in row["status"] for row in rows if row["model"] == llama.folder)
+    assert all("interrupted transfer" in row["tuned_status"] for row in rows if row["model"] == llama.folder)
     reason = "shard2" if gpt_status == "ok" else gpt_status
     assert all(reason in row["status"] for row in rows if row["model"] == gpt.folder)
 

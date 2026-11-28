@@ -33,26 +33,34 @@ def test_best_correct_upstream_and_latency(tmp_path):
             (folder / f"c{c}-w1.json").write_text(json.dumps(obs))
     def read():
         return list(suite["record_rows"](model, dirs, {}, 1))
-    assert [(r["comparator"], r["ratio"]) for r in read()] == [(model.tuned, 1.5)]*2
+    assert [(r["comparator"], r["stock"], r["ratio"], r["ratio_vs_tuned"])
+            for r in read()] == [(model.stock, 10, 2.1, 1.5)]*2
     suite["write_summary"](tmp_path, read())
-    assert "37/150" in (tmp_path / "RESULTS.md").read_text()
-    assert "unsloth/Llama-3.1-8B-Instruct@" in (tmp_path / "RESULTS.md").read_text()
+    report = (tmp_path / "RESULTS.md").read_text()
+    assert "37/150" in report
+    assert "unsloth/Llama-3.1-8B-Instruct@" in report
+    assert "Ratio vs stock | Ratio vs tuned" in report
+    assert "| 10.00 | 14.00 | 21.00 | 2.10 | 1.50 |" in report
     path = dirs[model.tuned] / "c1-w1.json"
     valid = json.loads(path.read_text())
     for key, value in (("spec_decode_accepted_tokens", None), ("spec_decode_accepted_tokens", 0),
                        ("spec_decode_draft_tokens", 30), ("spec_decode_accepted_tokens", 151),
                        ("generated_texts", ["different"] * 8)):
         path.write_text(json.dumps({**valid, key: value}))
-        assert [r["ratio"] for r in read()] == [None, 1.5]
+        assert [r["ratio"] for r in read()] == [2.1, 2.1]
+        assert [r["ratio_vs_tuned"] for r in read()] == [None, 1.5]
     path.write_text(json.dumps(valid))
     f = dirs[model.fork] / "c1-w1.json"
     changed = json.loads(f.read_text())
     changed["ttfts"][1] = .30
     f.write_text(json.dumps(changed))
     assert read()[0]["ratio"] is None
+    assert read()[0]["ratio_vs_tuned"] is None
     assert "p90" in read()[0]["status"]
     (dirs[model.tuned] / "cache-c3.json").unlink()
-    assert all(r["ratio"] is None and r["covex"] == 21 for r in read())
+    assert all(r["ratio"] is None and r["covex"] == 21 for r in read()[:1])
+    assert read()[1]["ratio"] == 2.1
+    assert read()[1]["ratio_vs_tuned"] is None
 
 
 def test_fixed_replay_and_answers(tmp_path):

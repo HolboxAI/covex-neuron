@@ -89,7 +89,7 @@ def test_asr_replica_row_layout_and_labels():
     spec = importlib.util.spec_from_file_location("six", Path(__file__).resolve().parents[2] / "benchmarks/six/run.py")
     six = importlib.util.module_from_spec(spec); spec.loader.exec_module(six)
     asr = [m for w in six.WAVES for m in w if m.kind == "asr"]
-    assert {(m.stock, m.fork, m.tp, m.replicas) for m in asr} == {("asr-U", "asr-DMB", 8, 1), ("asr-U2", "asr-R", 4, 2)}
+    assert {(m.stock, m.fork, m.tp, m.replicas) for m in asr} == {("asr-U", "asr-B8", 8, 1), ("asr-U2", "asr-R", 4, 2)}
     assert all(six.ASR_LABELS[a] for m in asr for a in (m.stock, m.fork))
     for w in six.WAVES:
         six.check_wave_fits(w)
@@ -127,3 +127,15 @@ def test_vlstage_splits_image_cost_from_decode(tmp_path, monkeypatch):
     assert result["image_cost_s"] == pytest.approx(.2)
     assert result["decode_tail_s"] == pytest.approx(.07)
     assert result["max_latency_gain_if_image_cost_zero"] == pytest.approx(.33 / .13)
+
+
+
+def test_asr_arms_never_request_multiple_audio_prefills_per_step():
+    """Campaign 3fd284f: max_prefills_per_batch 2 made every c8 audio request fail (encoder graph holds one request)."""
+    import subprocess
+    arms = ("S2", "B8", "R4", "RB")
+    for a in arms:
+        out = subprocess.run(["bash", "-c", f"source {Path(__file__).resolve().parents[2]}/benchmarks/asr/arm_config.sh && arm_config {a}"],
+                             capture_output=True, text=True, check=True).stdout
+        cfg = json.loads(out)
+        assert cfg["neuron_config"].get("max_prefills_per_batch", 1) == 1, (a, cfg)

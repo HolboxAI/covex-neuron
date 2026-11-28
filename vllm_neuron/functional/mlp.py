@@ -683,9 +683,11 @@ def _get_activation_fn(act_fn: ActFnType):
     elif act_fn == ActFnType.GELU:
         # Wrapped like the tanh variant: a bare F.gelu object reaches dynamo as the C builtin
         # torch._C._nn.gelu and fails to trace (CPU-mode torch fallback, skip_gate MLPs).
-        return lambda x: torch.nn.functional.gelu(x)
+        # Explicit erf form: on Neuron, libtorch_neuronx_lite wraps F.gelu and dynamo refuses the wrapper ("function
+        # marked as skipped"); this failed the Qwen3-VL vision MLP compile in campaign 3fd284f. Same math as F.gelu.
+        return lambda x: 0.5 * x * (1.0 + torch.erf(x * 0.7071067811865476))
     elif act_fn == ActFnType.GELU_Tanh_Approx:
-        return lambda x: torch.nn.functional.gelu(x, approximate="tanh")
+        return lambda x: 0.5 * x * (1.0 + torch.tanh(0.7978845608028654 * (x + 0.044715 * x * x * x)))
     else:
         raise ValueError(f"Unsupported activation function: {act_fn}")
 

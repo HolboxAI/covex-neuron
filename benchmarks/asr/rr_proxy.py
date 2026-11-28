@@ -11,8 +11,10 @@ The proxy adds one local hop; its overhead is measured by running the 1-replica 
 """
 import http.server
 import itertools
+import json
 import sys
 import threading
+import time
 
 import httpx
 
@@ -23,6 +25,30 @@ HOP = {"connection", "keep-alive", "proxy-authenticate", "proxy-authorization", 
 def make_handler(backends):
     rr = itertools.cycle(backends)
     lock = threading.Lock()
+    # per-replica accounting (Kiln found one engine serving 63 of 64 requests): requests, request bytes (audio size),
+    # busy seconds (wall time with >= 1 request in flight) and in-flight peak; GET /proxy_stats returns it as JSON
+    stats = {b: {"requests": 0, "errors": 0, "request_bytes": 0, "busy_s": 0.0, "inflight": 0, "inflight_peak": 0,
+                 "_busy_since": None} for b in backends}
+
+    def begin(port, nbytes):
+        with lock:
+            st = stats[port]; st["requests"] += 1; st["request_bytes"] += nbytes; st["inflight"] += 1
+            st["inflight_peak"] = max(st["inflight_peak"], st["inflight"])
+            if st["inflight"] == 1:
+                st["_busy_since"] = time.monotonic()
+
+    def end(port, ok):
+        with lock:
+            st = stats[port]; st["inflight"] -= 1; st["errors"] += 0 if ok else 1
+            if st["inflight"] == 0 and st["_busy_since"] is not None:
+                st["busy_s"] += time.monotonic() - st["_busy_since"]; st["_busy_since"] = None
+
+    def snapshot():
+        with lock:
+            now = time.monotonic()
+            return {str(b): {k: (round(v + (now - st["_busy_since"] if k == "busy_s" and st["_busy_since"] else 0), 3)
+                                 if k == "busy_s" else v) for k, v in st.items() if not k.startswith("_")}
+                    for b, st in stats.items()}
     client = httpx.Client(timeout=httpx.Timeout(1800, connect=10), limits=httpx.Limits(max_connections=512))
 
     def nxt():
@@ -54,6 +80,7 @@ def make_handler(backends):
             body = self.rfile.read(n) if n else None
             headers = {k: v for k, v in self.headers.items() if k.lower() not in HOP}
             port = nxt()
+            begin(port, n); ok = False
             try:
                 with client.stream(method, f"http://127.0.0.1:{port}{self.path}", content=body, headers=headers) as r:
                     self.send_response(r.status_code)
@@ -64,13 +91,18 @@ def make_handler(backends):
                     self.end_headers()
                     for chunk in r.iter_raw():
                         self.wfile.write(chunk); self.wfile.flush()
+                    ok = r.status_code < 400
             except httpx.HTTPError as e:
                 self._reply(502, f"replica {port}: {type(e).__name__}".encode())
+            finally:
+                end(port, ok)
 
         def do_GET(self):
             if self.path == "/health":
                 outs = self._all("/health")
                 return self._reply(200 if all(c == 200 for c, _ in outs) else 503, b"")
+            if self.path == "/proxy_stats":
+                return self._reply(200, json.dumps(snapshot()).encode(), "application/json")
             if self.path == "/metrics":
                 outs = self._all("/metrics")
                 if not all(c == 200 for c, _ in outs):

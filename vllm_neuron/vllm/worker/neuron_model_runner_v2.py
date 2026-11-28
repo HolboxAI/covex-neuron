@@ -307,6 +307,7 @@ class NeuronModelRunnerV2:
         # Async-scheduling stats.
         self._async_steps = 0
         self._sync_fallback_steps = 0
+        self._qwen_boundary_trace = os.getenv("COVEX_QWEN_BOUNDARY_TRACE") == "1"
         self._debug_logits_dir = self.neuron_config.debug_logits_dir
         self._emit_debug_logits = self._debug_logits_dir is not None
         self._debug_logits_capture_index = 0
@@ -2598,6 +2599,22 @@ class NeuronModelRunnerV2:
                     raw_g, positions_flat, req_indices, self.block_sizes[g]
                 )
             )
+            if getattr(self, "_qwen_boundary_trace", False) and not is_prefill and swa_width is None:
+                import json
+
+                from vllm.distributed.parallel_state import get_tp_group
+                from .qwen_boundary_trace import page_record
+
+                for i, pos in enumerate(positions_flat):
+                    if 8188 <= pos <= 8221:
+                        row = int(req_indices[i])
+                        slot = int(slots[row])
+                        event = page_record(raw_g[row], int(rs.num_blocks(g, slot)), self.block_sizes[g],
+                                            int(pos), int(slot_mappings_flat[g][i]))
+                        event.update(request_id=rs.index_to_req_id[slot], tp_rank=get_tp_group().rank_in_group,
+                                     group=g, row=row, active_rows=num_active, row_bucket=row_bucket,
+                                     table_width=int(raw_g.shape[1]))
+                        logger.info("COVEX_QWEN_BOUNDARY %s", json.dumps(event))
 
         # Pad positions + slot mapping to the fixed token width (pad positions 0, pad slot NULL_BLOCK_ID).
         positions = np.zeros(padded_num_tokens, dtype=np.int32)

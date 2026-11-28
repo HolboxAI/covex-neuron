@@ -77,15 +77,18 @@ case "$ARM" in
     ARGS=("$M/Qwen3-Embedding-8B" --served-model-name m --runner pooling --dtype bfloat16 --tensor-parallel-size 8
           --max-model-len 4096 --max-num-batched-tokens 4096 --max-num-seqs 32 --no-enable-prefix-caching
           ); CFG="{\"neuron_config\":{${EXTRA}\"num_batched_tokens_buckets\":[128,256,512,1024,2048,4096]}}" ;;
-  vl-U|vl-T|vl-C)  # Qwen3-VL-32B, TP4 (1 chip), tutorial BF16 config; C = vision MLP on NKI kernel + LayerNorm fold
-    [ "$ARM" != vl-C ] && CORES=48-51 || { CORES=52-55; export COVEX_VL_VISION_MLP_NKI=1 COVEX_VL_VISION_LN_IN_MLP=1; }
+  vl-U|vl-T|vl-C|vl-Ub|vl-Cb)  # Qwen3-VL-32B, TP4 (1 chip), tutorial BF16 config; C = vision MLP on NKI kernel + LayerNorm fold
+    # *b = the same arm with prefill buckets [512..8192] instead of the single 8192 bucket: campaign 3fd284f showed the
+    # image is 3% of a 1.58 s request and a text-only 1-token request already takes 1.55 s (every prompt padded to 8192).
+    case $ARM in vl-C|vl-Cb) CORES=52-55; export COVEX_VL_VISION_MLP_NKI=1 COVEX_VL_VISION_LN_IN_MLP=1 ;; *) CORES=48-51 ;; esac
+    VL_BUCKETS='[8192]'; case $ARM in *b) VL_BUCKETS='[512,1024,2048,4096,8192]' ;; esac
     # 66.7 GB weights over TP4 = 15.5 GiB/core; default cap 0.30 leaves ~2.4 GiB for NEFFs (same margin that failed
     # Qwen3-32B). 0.15 -> 3.2 GiB KV (4 seqs x 8K needs 2 GiB), ~5.3 GiB headroom. Same in T and C.
     export VLLM_NEURON_KV_GMU_BUDGET_CAP_FRACTION=0.15
     # Single-shot prefill (batched tokens == max_model_len) is incompatible with prefix caching (failed 2026-11-27).
     ARGS=("$M/Qwen3-VL-32B-Instruct" --served-model-name m --max-model-len 8192 --max-num-batched-tokens 8192
           --max-num-seqs 4 --tensor-parallel-size 4 --no-enable-prefix-caching
-          ); CFG='{"neuron_config":{"quantization":"bf16","num_batched_tokens_buckets":[8192],"num_seqs_buckets":[4],"on_device_sampling_config":{"all_greedy":true}},"encoder_neuron_config":{"num_encoder_input_buckets":[2048],"encoder_attention_block_size":2048}}' ;;
+          ); CFG="{\"neuron_config\":{\"quantization\":\"bf16\",\"num_batched_tokens_buckets\":$VL_BUCKETS,\"num_seqs_buckets\":[4],\"on_device_sampling_config\":{\"all_greedy\":true}},\"encoder_neuron_config\":{\"num_encoder_input_buckets\":[2048],\"encoder_attention_block_size\":2048}}" ;;
   oss-U|oss-P|oss-T|oss-U8k|oss-P8k)  # GPT-OSS-20B BF16. P omits padded tokens from prefill expert routing.
     CORES=56-63
     case $ARM in

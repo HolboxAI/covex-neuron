@@ -25,9 +25,12 @@ arm_config() {
     DE1) export VLLM_NEURON_ASR_AUDIO_MLP_NKI=1; enc_dp=1 ;;
     T4)  ARM_TP=4; enc_dp=4 ;;
     # run-2 campaign arms (no encoder kernel: DL lost 10% at c8). R* = one TP4 replica; serve_replicas.sh runs two.
-    DMB) buckets='"num_batched_tokens_bucket_step": 128,'; extra='"max_prefills_per_batch": 2,' ;;   # TP8: #3 + #5
+    # campaign 3fd284f: two audio prefills per step fail every c8 request ("_gather_mm_embeddings expects
+    # single-request prefill ... max_encoder_blocks_per_request=4 assumes one request per step"), so the fork ASR arms
+    # keep ONE audio prefill per step (client still 8 in flight) and change only the 128-token prefill buckets (#5).
+    B8)  buckets='"num_batched_tokens_bucket_step": 128,' ;;                                       # TP8: #5 only
     R4)  ARM_TP=4; enc_dp=4 ;;                                                                     # stock config, TP4
-    RDMB) ARM_TP=4; enc_dp=4; buckets='"num_batched_tokens_bucket_step": 128,'; extra='"max_prefills_per_batch": 2,' ;;
+    RB)  ARM_TP=4; enc_dp=4; buckets='"num_batched_tokens_bucket_step": 128,' ;;                 # TP4 replica: #5 only
     *) echo "unknown arm $arm" >&2; return 2 ;;
   esac
   cat <<JSON

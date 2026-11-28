@@ -70,6 +70,9 @@ def test_round_robin_streaming_metrics_and_health():
             m = c.get(f"http://127.0.0.1:{lp}/metrics").text
             assert m.count("vllm:e2e_request_latency_seconds_count 5") == 2            # both replicas, summable
             assert c.get(f"http://127.0.0.1:{lp}/health").status_code == 200
+            st = c.get(f"http://127.0.0.1:{lp}/proxy_stats").json()
+            assert sorted(v["requests"] for v in st.values()) == [3, 4], st        # 6 transcriptions + 1 stream
+            assert all(v["inflight"] == 0 and v["busy_s"] > 0 and v["errors"] == 0 for v in st.values()), st
     finally:
         p.kill(); p.wait(); a.shutdown(); b.shutdown()
 

@@ -1,0 +1,20 @@
+{
+  "dataset": "sixdata/embed/t64.jsonl",
+  "dataset_sha256": "fca3b1c950f5e43e5a5913c044178e03ec4a2dc4e01a8d288dc14d0d8d42f3d2",
+  "source_attempt": "six/20261128T010230Z-f052f0f6-8952-4acd-81d3-6c7f77dfb03b/",
+  "physical_valid_tokens_in_logged_pair": 55,
+  "diagnostic_inputs": {
+    "A": {
+      "input_line_one_based": 3,
+      "text_sha256": "401bab9c3bf3eb23093e05024e15f0bef43be449a5a20b81a2aafe7130e732b0"
+    },
+    "A_prime": {
+      "input_line_one_based": 8,
+      "text_sha256": "22ec600e79a0859d9853002c0303c851dce9a5598b5c1be1d51ccb50d681cfbd"
+    },
+    "B": {
+      "input_line_one_based": 9,
+      "text_sha256": "3f99430c962dd0a6993ea73c1766568ecef4902e72ab4e69da4f259838747e13"
+    }
+  }
+}
