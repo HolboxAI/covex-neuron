@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """K9 engine check (CPU mode, small real Qwen3): predicted-output decoding must reproduce plain greedy decoding exactly.
-Usage: cpu_check.py <ref_port> <k9_port> <out.json> [--n 6] [--tokens 48]
+Usage: cpu_check.py <ref_port> <k9_port> <out.json> [--n 6] [--tokens 48] [--refs refs.json]
+  With --refs: k9_port 0 = only produce and save the reference; ref_port 0 = only check K9 against the saved file
+  (the two servers then never run at the same time; two TP8 CPU-mode servers OOM-killed a worker on m7i.16xlarge).
 
 For each prompt, the reference (fork, no speculation) gives greedy token ids. The K9 server then decodes the same prompt
 with: the exact reference as the prediction (full acceptance), the reference with one token changed mid-way (partial
@@ -46,10 +48,21 @@ def main(a):
     n = int(a[a.index("--n") + 1]) if "--n" in a else 6
     tokens = int(a[a.index("--tokens") + 1]) if "--tokens" in a else 48
     problems, rows = [], []
+    refs_file = a[a.index("--refs") + 1] if "--refs" in a else None
     try:
         with httpx.Client(timeout=900) as c:
             prompts = PROMPTS[:n]
-            ref = [gen(c, ref_port, p, tokens) for p in prompts]
+            if refs_file and k9_port == 0:          # phase 1: reference server only; save its greedy outputs
+                ref = [gen(c, ref_port, p, tokens) for p in prompts]
+                json.dump({"prompts": prompts, "tokens": tokens, "ref": ref}, open(refs_file, "w"))
+                print(json.dumps({"saved_refs": len(ref)})); return 0
+            if refs_file and ref_port == 0:         # phase 2: K9 server only, against the saved reference
+                saved = json.load(open(refs_file))
+                if saved["prompts"] != prompts or saved["tokens"] != tokens:
+                    raise ValueError("saved reference was made for different prompts or token count")
+                ref = saved["ref"]
+            else:
+                ref = [gen(c, ref_port, p, tokens) for p in prompts]
             cases = {}
             for i, p in enumerate(prompts):
                 perturbed = list(ref[i]); perturbed[len(perturbed) // 3] = (perturbed[len(perturbed) // 3] + 1) % 1000

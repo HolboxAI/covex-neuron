@@ -4,11 +4,13 @@
 set -uo pipefail
 H=$(cd "$(dirname "$0")" && pwd); F=$H/../five; source "$H/../lib.sh"
 mkdir -p logs results
-export VLLM_NEURON_CPU_MODE=1 REHEARSAL_EXTRA="--gpu-memory-utilization 0.2" MODELS_DIR=${MODELS_DIR:-$HOME/models-small}
-n=$(nproc); half=$((n / 2))
-taskset -c "0-$((half - 1))" "$F/serve.sh" k9-T 8300 & T=$!
-taskset -c "$half-$((n - 1))" "$F/serve.sh" k9-P 8301 & P=$!
-trap 'stop_arm $T; stop_arm $P' EXIT
+export VLLM_NEURON_CPU_MODE=1 REHEARSAL_EXTRA="--gpu-memory-utilization ${K9_CPU_MEM_UTIL:-0.05}" MODELS_DIR=${MODELS_DIR:-$HOME/models-small}
+# One server at a time: two TP8 CPU-mode servers (16 workers) OOM-killed a worker on a 256 GB m7i.16xlarge (5ef9478 run).
+"$F/serve.sh" k9-T 8300 & T=$!
+trap 'stop_arm $T; stop_arm ${P:-}' EXIT
 rt=$(wait_ready $T 8300 ${K9_READY_SECS:-2400} gen m) || { echo "k9-T not ready: $rt"; exit 2; }
+python3 "$H/cpu_check.py" 8300 0 results/k9-cpu.json --n 6 --tokens 48 --refs results/k9-refs.json || { echo "reference phase failed"; exit 3; }
+stop_arm $T
+"$F/serve.sh" k9-P 8301 & P=$!
 rp=$(wait_ready $P 8301 ${K9_READY_SECS:-2400} gen m) || { echo "k9-P not ready: $rp"; exit 2; }
-python3 "$H/cpu_check.py" 8300 8301 results/k9-cpu.json --n 6 --tokens 48
+python3 "$H/cpu_check.py" 0 8301 results/k9-cpu.json --n 6 --tokens 48 --refs results/k9-refs.json

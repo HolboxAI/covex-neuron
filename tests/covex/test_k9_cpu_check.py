@@ -56,3 +56,22 @@ def test_prediction_dependent_output_fails(tmp_path):
 def test_no_speculation_fails(tmp_path):
     rc, d = _check(tmp_path, accept=False)
     assert rc == 1 and "speculation did not run" in " ".join(d["problems"])
+
+
+
+def test_two_phase_refs_file_matches_single_phase(tmp_path):
+    ref, k9 = _server(), _server(k9=True)
+    try:
+        refs = tmp_path / "refs.json"
+        r1 = subprocess.run([sys.executable, str(ROOT / "benchmarks/k9/cpu_check.py"), str(ref.server_port), "0", str(tmp_path / "a.json"),
+                             "--n", "3", "--tokens", "12", "--refs", str(refs)], capture_output=True, text=True, timeout=60)
+        assert r1.returncode == 0 and json.load(open(refs))["ref"], r1.stdout + r1.stderr
+        r2 = subprocess.run([sys.executable, str(ROOT / "benchmarks/k9/cpu_check.py"), "0", str(k9.server_port), str(tmp_path / "k.json"),
+                             "--n", "3", "--tokens", "12", "--refs", str(refs)], capture_output=True, text=True, timeout=60)
+        d = json.load(open(tmp_path / "k.json"))
+        assert r2.returncode == 0 and d["pass"] and len(d["cases"]) == 24, d
+        r3 = subprocess.run([sys.executable, str(ROOT / "benchmarks/k9/cpu_check.py"), "0", str(k9.server_port), str(tmp_path / "x.json"),
+                             "--n", "2", "--tokens", "12", "--refs", str(refs)], capture_output=True, text=True, timeout=60)
+        assert r3.returncode == 1 and "different prompts" in json.load(open(tmp_path / "x.json"))["problems"][0]
+    finally:
+        ref.shutdown(); k9.shutdown()
