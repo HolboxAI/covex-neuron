@@ -38,7 +38,7 @@ case "$ARM" in
     ARGS=("$M/Qwen3-32B" --served-model-name m --dtype bfloat16 --tensor-parallel-size 8 --max-model-len 32768
           --max-num-batched-tokens 8192 --max-num-seqs 8 --no-enable-prefix-caching
           ); CFG="{\"neuron_config\":{${CTX:-}\"num_batched_tokens_buckets\":[1024,8192],\"num_seqs_buckets\":[1,2,4,8],\"on_device_sampling_config\":{\"all_greedy\":true}}}" ;;
-  k9-U|k9-E3|k9-P)  # K9 code-edit benchmark, Qwen3-32B BF16 TP8 at 10,240 context (where upstream validated EAGLE3),
+  k9-U|k9-T|k9-E3|k9-P)  # K9 code-edit benchmark, Qwen3-32B BF16 TP8 at 10,240 context (where upstream validated EAGLE3),
     # 4 sequences, identical config except the speculation:
     #   U  = pinned upstream, no speculation          E3 = pinned upstream + EAGLE3 draft (4 tokens)
     #   P  = fork, predicted outputs / prompt lookup (method ngram, 4 tokens; host-proposed, synchronous scheduling)
@@ -47,6 +47,7 @@ case "$ARM" in
       k9-U)  CORES=${K9_CORES:-0-7};  VLLM=("${UPSTREAM_PY:?UPSTREAM_PY (upstream venv python) required}" -m vllm.entrypoints.cli.main) ;;
       k9-E3) CORES=${K9_CORES:-8-15}; VLLM=("${UPSTREAM_PY:?UPSTREAM_PY (upstream venv python) required}" -m vllm.entrypoints.cli.main)
              SPEC=(--speculative-config "{\"method\":\"eagle3\",\"model\":\"$M/Qwen3-32B-speculator.eagle3\",\"num_speculative_tokens\":4}") ;;
+      k9-T)  CORES=${K9_CORES:-24-31} ;;   # fork, no speculation: the exactness reference for k9-P (CPU check)
       k9-P)  CORES=${K9_CORES:-16-23}
              SPEC=(--speculative-config '{"method":"ngram","num_speculative_tokens":4,"prompt_lookup_min":3,"prompt_lookup_max":8}' --no-async-scheduling) ;;
     esac
