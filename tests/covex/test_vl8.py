@@ -32,7 +32,8 @@ def _fixture(tmp, tps_c=40.0, answers_c=None, prompt=230, p90_c=2, bad_window=No
                 ans = answers_c
             (r / f"{arm}-c4-w{w}.json").write_text(json.dumps({
                 "n": 40, "concurrency": 4, "wall_s": 1, "req_per_s": tps / 10, "lat_p50_ms": 1,
-                "lat_p90_ms": p90_c if arm == "vl8-C" else 2, "out_tok_per_s": tps, "answers": ans,
+                "lat_p90_ms": p90_c if arm == "vl8-C" else 2, "latencies_s": [(p90_c if arm == "vl8-C" else 2) / 1000] * 40,
+                "out_tok_per_s": tps, "answers": ans,
                 "completion_tokens": (tokens_c if (arm == "vl8-C" and tokens_c) else [1] * 40), "prompt_tokens": [prompt] * 40}))
             for k, v in (("before", 0), ("after", 1)):
                 (m / f"{arm}-w{w}.{k}.prom").write_text(
@@ -71,10 +72,10 @@ def test_vl8_token_counts_and_p90_limit_gate_the_ratio(tmp_path):
     assert p.returncode == 1 and "output token counts differ" in p.stdout
     b = tmp_path / "b"; b.mkdir()
     p = _fixture(b, p90_c=3)                                           # 3 ms > 1.10 x 2 ms
-    assert p.returncode == 1 and "p90 3 ms > 1.10 x 2 ms" in p.stdout, p.stdout
+    assert p.returncode == 1 and "pooled p90 3 ms > 1.10 x 2 ms" in p.stdout, p.stdout
     c = tmp_path / "c"; c.mkdir()
     p = _fixture(c, p90_c=2.2)                                         # within 10%
-    assert p.returncode == 0 and "Short-answer VL TPS" in p.stdout
+    assert p.returncode == 0 and "Short-answer VL-8B" in p.stdout and "stock with an 8,192-token prefill bucket" in p.stdout
 
 
 import shutil
@@ -129,6 +130,7 @@ def _write(tmp, overrides):
     for arm, tps in (("vl8-U", 10.0), ("vl8-Ub", 38.0), ("vl8-C", 40.0)):
         for w in ["warm", 1, 2, 3]:
             d = {"n": 40, "concurrency": 4, "wall_s": 1, "req_per_s": 1, "lat_p50_ms": 1, "lat_p90_ms": 2, "out_tok_per_s": tps,
+                 "latencies_s": [0.002] * 40,
                  "answers": ["A"] * 40, "completion_tokens": [1] * 40, "prompt_tokens": [230] * 40}
             d.update(overrides.get(arm, {}))
             (r / f"{arm}-c4-w{w}.json").write_text(json.dumps(d))
@@ -174,3 +176,19 @@ def test_vl8_failed_warmup_voids_the_arm(tmp_path):
 def test_vl8_run_records_per_arm_window_status():
     s = (ROOT / "benchmarks/vl8/run.sh").read_text()
     assert '[ $rc = 0 ] || status $a "bench-c4-w$w"' in s and "stage-probe" in s
+
+
+
+def test_vl8_pooled_p90_catches_a_regression_hidden_by_per_window_p90s(tmp_path):
+    """Astra: every window's own p90 looked fine, but pooled over all 120 requests COVEX's p90 went 100 -> 250 ms."""
+    import json as _j
+    base = [0.100] * 40
+    slow = [0.050] * 30 + [0.250] * 10          # each window's own p90 sits at the 36th value (0.25 s)...
+    r, m = _write(tmp_path, {"vl8-U": {"latencies_s": base, "lat_p90_ms": 100}, "vl8-Ub": {"latencies_s": base, "lat_p90_ms": 100},
+                             "vl8-C": {"latencies_s": slow, "lat_p90_ms": 50}})     # ...but the recorded lat_p90_ms lies
+    p = _summ(r, m)
+    row = next(l for l in p.stdout.splitlines() if l.startswith("| vl8-C vs vl8-U |"))
+    assert "| – |" in row and "pooled p90 250 ms > 1.10 x 100 ms" in row, row
+    d = _j.loads((r / "vl8-C-c4-w1.json").read_text()); d["latencies_s"] = d["latencies_s"][:39]
+    (r / "vl8-C-c4-w1.json").write_text(_j.dumps(d))
+    assert "pooled p90 unavailable" in _summ(r, m).stdout

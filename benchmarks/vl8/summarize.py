@@ -61,6 +61,21 @@ def stage_means(arm):
     return {k: (v[0] / v[1] if v[1] else None) for k, v in tot.items()}
 
 
+def pooled_p90(ds):
+    """p90 request latency (ms) over EVERY measured request of every scored window (W x N values), never a max or
+    median of per-window p90s (Astra: max-of-window p90 printed 4.00x complete while pooled p90 went 100 -> 250 ms).
+    None when any window lacks a full set of finite per-request latencies."""
+    import math
+    lat = []
+    for d in ds:
+        v = (d or {}).get("latencies_s")
+        if not isinstance(v, list) or len(v) != N or not all(isinstance(x, (int, float)) and math.isfinite(x) and x >= 0 for x in v):
+            return None
+        lat += v
+    lat.sort()
+    return 1000 * lat[max(0, math.ceil(0.9 * len(lat)) - 1)]
+
+
 def bucket(t, bs):
     return next((b for b in bs if b >= t), None)
 
@@ -75,10 +90,12 @@ for arm in ARMS:
     pad = (sum(bucket(t, BUCKETS[arm]) or 0 for t in pt) / sum(pt)) if pt else None
     rows[arm] = {"tps": tps, "median": round(statistics.median(tps), 2) if len(tps) == W else None, "complete": all(ok),
                  "answers_w": [(d or {}).get("answers") for d in ds], "tokens_w": [(d or {}).get("completion_tokens") for d in ds], "req_s": statistics.median([d["req_per_s"] for d in ds if d]) if all(ok) else None,
-                 "p90": max((d.get("lat_p90_ms") for d in ds if d), default=None), "prompt_p50": statistics.median(pt) if pt else None,
+                 "p90": pooled_p90(ds), "prompt_p50": statistics.median(pt) if pt else None,
                  "prompt_max": max(pt) if pt else None, "padding": pad, "stages": stage_means(arm), "stage_probe": load(f"{R}/{arm}-stage.json"),
                  "failed": failed.get(arm, [])}
-print("| Arm | out tok/s per window | median | req/s | p90 request ms | prompt tokens p50 / max | padded / real tokens | "
+print("Arms: vl8-U = stock with an 8,192-token prefill bucket (the bar); vl8-Ub = stock with COVEX's buckets (attribution);")
+print("vl8-C = COVEX. p90 = pooled over all measured requests of all scored windows.\n")
+print("| Arm | out tok/s per window | median | req/s | pooled p90 request ms | prompt tokens p50 / max | padded / real tokens | "
       "mean prefill / decode / queue s per request | serial image cost s | Status |\n|---|---|---|---|---|---|---|---|---|---|")
 for arm, r in rows.items():
     st = r["stages"]; sp = r["stage_probe"] or {}
@@ -106,7 +123,7 @@ def answer_problems(side, ref, name):
             return f"{name} w{w + 1}: per-request output token counts differ from vanilla stock"
     return ""
 incomplete = []
-print("\n## Short-answer VL TPS (single option letter per question)\n")
+print("\n## Short-answer VL-8B (single option letter per question): COVEX vs stock with an 8,192-token prefill bucket\n")
 print("| Comparison | Ratio | Status |\n|---|---|---|")
 for arm, base in (("vl8-C", "vl8-U"), ("vl8-C", "vl8-Ub"), ("vl8-Ub", "vl8-U")):
     x, b = rows.get(arm), rows.get(base)
@@ -128,9 +145,9 @@ for arm, base in (("vl8-C", "vl8-U"), ("vl8-C", "vl8-Ub"), ("vl8-Ub", "vl8-U")):
         if generic_fail:
             why.append("a window failed: " + "; ".join(generic_fail))
         if x["p90"] is None or b["p90"] is None:
-            why.append("p90 latency missing")
+            why.append("pooled p90 unavailable (per-request latencies missing or incomplete)")
         elif x["p90"] > P90_TOL * b["p90"]:
-            why.append(f"p90 {x['p90']:.0f} ms > {P90_TOL:.2f} x {b['p90']:.0f} ms of {base}")
+            why.append(f"pooled p90 {x['p90']:.0f} ms > {P90_TOL:.2f} x {b['p90']:.0f} ms of {base}")
     ratio = f"{x['median'] / b['median']:.2f}x" if not why else "–"
     print(f"| {arm} vs {base} | {ratio} | {'; '.join(why) or 'complete'} |")
     if why and (arm, base) == ("vl8-C", "vl8-U"):
