@@ -3,7 +3,7 @@
   "Qwen/Qwen3-Embedding-8B": "1d8ad4ca9b3dd8059ad90a75d4983776a23d44af",
   "Qwen/Qwen3-ASR-1.7B": "7278e1e70fe206f11671096ffdd38061171dd6e5",
   "Qwen/Qwen3-VL-32B-Instruct": "0cfaf48183f594c314753d30a4c4974bc75f3ccb",
-  "meta-llama/Llama-3.1-8B-Instruct": "0e9e39f249a16976918f6564b8830bc894c89659",
+  "unsloth/Llama-3.1-8B-Instruct": "4699cc75b550f9c6f3173fb80f4703b62d946aa5",
   "RedHatAI/Llama-3.1-8B-Instruct-speculator.eagle3": "f4fa34a8f803a0ba75d048d6b3dbc1ad5149e9ac",
   "openai/gpt-oss-20b": "6cee5e81ee83917806bbde320786a8fb61efebee"
 }
