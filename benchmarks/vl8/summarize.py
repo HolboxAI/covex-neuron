@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
-"""Qwen3-VL-8B pass-1 summary. Usage: summarize.py <results> <metrics> --arms "vl8-U vl8-Ub vl8-C" --windows 3 --n 40
+"""Qwen3-VL-8B pass-1 summary: SHORT-ANSWER VL TPS (each question asks for a single option letter, so output tokens are
+few and the number measures prefill-dominated serving, not long-form generation). Usage: summarize.py <results> <metrics> --arms "vl8-U vl8-Ub vl8-C" --windows 3 --n 40
 Per arm: output tok/s per window and median, requests/s, p90 request latency, completed/requested, prompt tokens and
 padding (bucket tokens / real tokens, from the exact usage.prompt_tokens and the arm's bucket list), and the server's
 mean per-request prefill / decode / queue time from vLLM /metrics deltas. Ratios COVEX vs vanilla (the bar) and vs
-tuned stock, printed only when every window of both arms completed all requests and the first 20 answers match
-vanilla's. Exit 1 when the COVEX-vs-vanilla comparison is incomplete."""
+tuned stock, printed only when every window of both arms completed all requests, ALL answers and per-request output
+token counts of EVERY window equal vanilla's (requests are issued in the same order), and the arm's p90 request
+latency is within P90_TOL (10%, the campaign's non-Qwen tolerance) of the comparison arm's. Exit 1 when the
+COVEX-vs-vanilla comparison is incomplete or disqualified."""
+P90_TOL = 1.10
 import json, os, re, statistics, sys
 
 a = sys.argv
@@ -70,7 +74,7 @@ for arm in ARMS:
     pt = [t for d in ds if d for t in (d.get("prompt_tokens") or []) if isinstance(t, int)]
     pad = (sum(bucket(t, BUCKETS[arm]) or 0 for t in pt) / sum(pt)) if pt else None
     rows[arm] = {"tps": tps, "median": round(statistics.median(tps), 2) if len(tps) == W else None, "complete": all(ok),
-                 "answers": (ds[0] or {}).get("answers"), "req_s": statistics.median([d["req_per_s"] for d in ds if d]) if all(ok) else None,
+                 "answers_w": [(d or {}).get("answers") for d in ds], "tokens_w": [(d or {}).get("completion_tokens") for d in ds], "req_s": statistics.median([d["req_per_s"] for d in ds if d]) if all(ok) else None,
                  "p90": max((d.get("lat_p90_ms") for d in ds if d), default=None), "prompt_p50": statistics.median(pt) if pt else None,
                  "prompt_max": max(pt) if pt else None, "padding": pad, "stages": stage_means(arm), "stage_probe": load(f"{R}/{arm}-stage.json"),
                  "failed": failed.get(arm, [])}
@@ -86,7 +90,8 @@ for arm, r in rows.items():
           f"{'; '.join(r['failed']) or ('complete' if r['complete'] else 'incomplete windows')} |")
 ref = rows.get("vl8-U")
 incomplete = []
-print("\n| Comparison | Ratio | Status |\n|---|---|---|")
+print("\n## Short-answer VL TPS (single option letter per question)\n")
+print("| Comparison | Ratio | Status |\n|---|---|---|")
 for arm, base in (("vl8-C", "vl8-U"), ("vl8-C", "vl8-Ub"), ("vl8-Ub", "vl8-U")):
     x, b = rows.get(arm), rows.get(base)
     why = []
@@ -97,8 +102,19 @@ for arm, base in (("vl8-C", "vl8-U"), ("vl8-C", "vl8-Ub"), ("vl8-Ub", "vl8-U")):
             why.append("incomplete windows")
         if x["failed"] or b["failed"]:
             why.append("failed step")
-        if ref and x["answers"] != ref["answers"]:
-            why.append("answers differ from vanilla stock")
+        if ref:
+            for w in range(W):
+                xa, ra = x["answers_w"][w], ref["answers_w"][w]
+                if not isinstance(xa, list) or len(xa) != N or not isinstance(ra, list) or len(ra) != N:
+                    why.append(f"w{w + 1}: answers not recorded for all {N} requests"); break
+                if xa != ra:
+                    why.append(f"w{w + 1}: answers differ from vanilla stock on {sum(p != q for p, q in zip(xa, ra))}/{N}"); break
+                if x["tokens_w"][w] != ref["tokens_w"][w]:
+                    why.append(f"w{w + 1}: per-request output token counts differ from vanilla stock"); break
+        if x["p90"] is None or b["p90"] is None:
+            why.append("p90 latency missing")
+        elif x["p90"] > P90_TOL * b["p90"]:
+            why.append(f"p90 {x['p90']:.0f} ms > {P90_TOL:.2f} x {b['p90']:.0f} ms of {base}")
     ratio = f"{x['median'] / b['median']:.2f}x" if not why else "–"
     print(f"| {arm} vs {base} | {ratio} | {'; '.join(why) or 'complete'} |")
     if why and (arm, base) == ("vl8-C", "vl8-U"):

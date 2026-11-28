@@ -22,15 +22,18 @@ def test_vl8_arms_differ_only_in_buckets_and_engine():
     assert len({o.split("cores=")[1].split()[0] for o in out.values()}) == 3          # one chip each
 
 
-def _fixture(tmp, tps_c=40.0, answers_c=None, prompt=230):
+def _fixture(tmp, tps_c=40.0, answers_c=None, prompt=230, p90_c=2, bad_window=None, tokens_c=None):
     r, m = tmp / "r", tmp / "m"
     r.mkdir(); m.mkdir()
     for arm, tps in (("vl8-U", 10.0), ("vl8-Ub", 38.0), ("vl8-C", tps_c)):
         for w in range(1, 4):
-            ans = answers_c if (arm == "vl8-C" and answers_c) else ["A"] * 20
+            ans = ["A"] * 40
+            if arm == "vl8-C" and answers_c and (bad_window is None or w == bad_window):
+                ans = answers_c
             (r / f"{arm}-c4-w{w}.json").write_text(json.dumps({
-                "n": 40, "concurrency": 4, "wall_s": 1, "req_per_s": tps / 10, "lat_p50_ms": 1, "lat_p90_ms": 2,
-                "out_tok_per_s": tps, "answers": ans, "completion_tokens": [1] * 40, "prompt_tokens": [prompt] * 40}))
+                "n": 40, "concurrency": 4, "wall_s": 1, "req_per_s": tps / 10, "lat_p50_ms": 1,
+                "lat_p90_ms": p90_c if arm == "vl8-C" else 2, "out_tok_per_s": tps, "answers": ans,
+                "completion_tokens": (tokens_c if (arm == "vl8-C" and tokens_c) else [1] * 40), "prompt_tokens": [prompt] * 40}))
             for k, v in (("before", 0), ("after", 1)):
                 (m / f"{arm}-w{w}.{k}.prom").write_text(
                     f"vllm:request_prefill_time_seconds_sum {v * 4.0}\nvllm:request_prefill_time_seconds_count {v * 40}\n"
@@ -51,8 +54,27 @@ def test_vl8_summary_padding_stages_and_ratios(tmp_path):
 
 
 def test_vl8_ratio_withheld_when_answers_differ(tmp_path):
-    p = _fixture(tmp_path, answers_c=["B"] * 20)
-    assert p.returncode == 1 and "answers differ from vanilla stock" in p.stdout
+    p = _fixture(tmp_path, answers_c=["B"] * 40)
+    assert p.returncode == 1 and "answers differ from vanilla stock on 40/40" in p.stdout
+
+
+def test_vl8_checks_all_40_answers_in_every_window(tmp_path):
+    """Astra: only 20 of 40 answers in window 1 were checked. A difference at request 35 of window 3 must disqualify."""
+    late = ["A"] * 35 + ["B"] + ["A"] * 4
+    p = _fixture(tmp_path, answers_c=late, bad_window=3)
+    assert p.returncode == 1 and "w3: answers differ from vanilla stock on 1/40" in p.stdout, p.stdout
+
+
+def test_vl8_token_counts_and_p90_limit_gate_the_ratio(tmp_path):
+    a = tmp_path / "a"; a.mkdir()
+    p = _fixture(a, tokens_c=[1] * 39 + [2])
+    assert p.returncode == 1 and "output token counts differ" in p.stdout
+    b = tmp_path / "b"; b.mkdir()
+    p = _fixture(b, p90_c=3)                                           # 3 ms > 1.10 x 2 ms
+    assert p.returncode == 1 and "p90 3 ms > 1.10 x 2 ms" in p.stdout, p.stdout
+    c = tmp_path / "c"; c.mkdir()
+    p = _fixture(c, p90_c=2.2)                                         # within 10%
+    assert p.returncode == 0 and "Short-answer VL TPS" in p.stdout
 
 
 import shutil

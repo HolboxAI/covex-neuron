@@ -59,7 +59,10 @@ def vl(port, d, n, conc, out):
     token_counts = [outs[i]["usage"]["completion_tokens"] for i in range(n)]
     prompt_tokens = [outs[i]["usage"].get("prompt_tokens") for i in range(n)]   # exact text+image tokens (padding report)
     toks = sum(token_counts)
-    answers = [outs[i]["choices"][0]["message"]["content"] for i in range(min(20, n))]
+    # VL_ALL_ANSWERS=1 (vl8 lane): every answer, in request order, so each window is checked in full; default keeps
+    # the first 20 that the six-model scorecard expects
+    keep = n if os.environ.get("VL_ALL_ANSWERS") == "1" else min(20, n)
+    answers = [outs[i]["choices"][0]["message"]["content"] for i in range(keep)]
     json.dump(summary(n, conc, wall, lat, {"out_tok_per_s": round(toks / wall, 2), "answers": answers,
                "completion_tokens": token_counts, "prompt_tokens": prompt_tokens}), open(out, "w"))
 

@@ -36,7 +36,7 @@ wait_all ${P[@]+"${P[@]}"} || status stage probe "FAILED a probe failed"
 for w in warm $(seq 1 "$WINDOWS"); do P=()
   for a in $ARMS; do up $a || continue
     ( scrape $a metrics/$a-w$w.before.prom
-      pin $a python3 $C vl ${PORT[$a]} "$D" "$N" 4 results/$a-c4-w$w.json > logs/$a-w$w.log 2>&1; rc=$?
+      VL_ALL_ANSWERS=1 pin $a python3 $C vl ${PORT[$a]} "$D" "$N" 4 results/$a-c4-w$w.json > logs/$a-w$w.log 2>&1; rc=$?
       scrape $a metrics/$a-w$w.after.prom; exit $rc ) & P+=($!); done
   wait_all ${P[@]+"${P[@]}"} || status bench "c4-w$w" "FAILED a client failed"
 done
