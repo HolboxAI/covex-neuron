@@ -114,3 +114,22 @@ def test_unpacked_step_is_inconclusive_even_with_both_members(tmp_path):
 def test_output_id_must_match_the_packed_trace(tmp_path):
     rc, d = _run(tmp_path, "wrong_id")
     assert rc == 1 and d["verdict"] == "inconclusive", d
+
+
+def test_replays_the_pinned_inputs_even_when_a_longer_group_exists():
+    import hashlib
+    import runpy
+    import pytest
+    from types import SimpleNamespace
+
+    pick = runpy.run_path(str(ROOT / "benchmarks/emb/replay_pairs.py"))["pick"]
+    texts = ["short", "red sun", "blue sky", "gold moon", "a long phrase", "a high hill", "a deep cave"]
+    tokenizer = SimpleNamespace(encode=lambda text, add_special_tokens: text.split())
+    witness = {"diagnostic_inputs": {
+        name: {"input_line_one_based": i + 1, "text_sha256": hashlib.sha256(texts[i].encode()).hexdigest()}
+        for name, i in (("A", 1), ("A_prime", 2), ("B", 3))
+    }}
+    prompts, length = pick(texts, tokenizer, witness)
+    assert (prompts["A"], prompts["A_prime"], prompts["B"], length) == ("red sun", "blue sky", "gold moon", 2)
+    with pytest.raises(ValueError, match="differs from the campaign"):
+        pick(list(reversed(texts)), tokenizer, witness)

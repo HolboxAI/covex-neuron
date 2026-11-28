@@ -62,6 +62,7 @@ UP
 chmod +x ~/upload_evidence.sh
 cd ~/run && mkdir -p results logs && export NEURON_VISIBLE_DEVICES=0-7 COVEX_PACK_TRACE=1 TORCH_DEVICE_BACKEND_AUTOLOAD=0 \
   VLLM_NEURON_RESERVED_HEADROOM_GIB=4 && T python3 ~/covex-neuron/benchmarks/emb/replay_pairs.py --model ~/models/Qwen3-Embedding-8B \
+  --case-file ~/covex-neuron/benchmarks/emb/campaign_pair_case.json \
   --dataset ~/data/sixdata/embed/t64.jsonl --tokenizer ~/models/Qwen3-Embedding-8B --packing 8 --repeat 3 \
   --out results/pairs.json --log logs/replay.log >> logs/replay.log 2>&1
 echo "RUN_EXIT=$?" | tee ~/run/STATUS

@@ -24,6 +24,7 @@ Verdict (written to the JSON, not decided by the caller):
 B is bound to the request id returned with its embedding, and the trace must confirm packed=True.
 """
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -73,7 +74,7 @@ def layout(steps, order, request_ids):
             "members": [(m["req"], m["start"], m["tokens"], m["padded"]) for m in members]}
 
 
-def pick(texts, tok):
+def pick(texts, tok, witness=None):
     """A, A' of equal length (B's offset fixed), B, X of a different length than A."""
     lens = {}
     for t in texts:
@@ -81,7 +82,23 @@ def pick(texts, tok):
     same = sorted((n, v) for n, v in lens.items() if len(v) >= 3)
     if not same:
         raise ValueError("need three prompts of one token length")
-    n, v = same[-1]
+    if witness is None:
+        n, v = same[-1]
+    else:
+        v = []
+        for name in ("A", "A_prime", "B"):
+            record = witness["diagnostic_inputs"][name]
+            index = record["input_line_one_based"] - 1
+            if index < 0 or index >= len(texts):
+                raise ValueError(f"missing original {name} in dataset")
+            text = texts[index]
+            if hashlib.sha256(text.encode()).hexdigest() != record["text_sha256"]:
+                raise ValueError(f"dataset differs from the campaign for {name}")
+            v.append(text)
+        lengths = {len(tok.encode(text, add_special_tokens=True)) for text in v}
+        if len(lengths) != 1 or len(set(v)) != 3:
+            raise ValueError("the original peer controls need three distinct equal-length inputs")
+        n = lengths.pop()
     other = next((w[0] for m, w in sorted(lens.items(), key=lambda kv: abs(kv[0] - n // 2)) if m != n), None)
     if other is None:
         raise ValueError("need a prompt of a different length for the offset case")
@@ -96,12 +113,14 @@ def main(argv=None):
     ap.add_argument("--model", required=True); ap.add_argument("--dataset", required=True); ap.add_argument("--tokenizer", required=True)
     ap.add_argument("--out", required=True); ap.add_argument("--packing", type=int, default=8); ap.add_argument("--repeat", type=int, default=3)
     ap.add_argument("--log", help="file the engine's stderr goes to (for the trace); default: the process's own stderr redirect")
+    ap.add_argument("--case-file", help="JSON identities of the original campaign inputs")
     a = ap.parse_args(argv)
     os.environ.setdefault("COVEX_PACK_TRACE", "1")
     from transformers import AutoTokenizer
     tok = AutoTokenizer.from_pretrained(a.tokenizer, local_files_only=True)
     texts = [json.loads(l)["text"] for l in open(a.dataset)]
-    prompts, n_tok = pick(texts, tok)
+    witness = json.loads(Path(a.case_file).read_text()) if a.case_file else None
+    prompts, n_tok = pick(texts, tok, witness)
     from vllm import LLM
     cfg = {"neuron_config": {"max_prefills_per_batch": a.packing, "num_batched_tokens_buckets": [128, 256, 512, 1024, 2048, 4096]}}
     llm = LLM(model=a.model, runner="pooling", dtype="bfloat16", tensor_parallel_size=8, max_model_len=4096,
@@ -132,6 +151,11 @@ def main(argv=None):
     for x, y in (("A+B", "A'+B"), ("B+A", "B+A'")):
         if lay.get(x) and lay.get(y) and lay[x] != lay[y]:
             why.append(f"{x} vs {y}: B's layout differs {sorted(lay[x])} vs {sorted(lay[y])} (peer comparison not controlled)")
+    if witness:
+        offset = witness["physical_valid_tokens_in_logged_pair"]
+        for name in ("A+B", "A'+B"):
+            if any(key[0] != offset for key in lay.get(name, ())):
+                why.append(f"{name}: failed to reproduce the original offset {offset}")
     repeat_stable = all(vec_cmp(vs[0], v)["exact"] for vs in vectors.values() for v in vs[1:])
     if not repeat_stable:
         why.append("identical case repeated gave a different B vector")
@@ -149,6 +173,7 @@ def main(argv=None):
            "inconclusive_because": why, "layouts": {k: sorted(v) for k, v in lay.items()},
            "peer_changed_same_offset_exact": same_off, "peer_changed_B_first_exact": first_same,
            "vs_B_alone": {k: v[0] for k, v in cmp.items()}, "runs": runs}
+    res["prompt_sha256"] = {k: hashlib.sha256(v.encode()).hexdigest() for k, v in prompts.items()}
     Path(a.out).write_text(json.dumps(res, indent=1))
     print(json.dumps({k: res[k] for k in ("verdict", "packing_verified", "repeat_stable", "peer_changed_same_offset_exact",
                                            "peer_changed_B_first_exact")}))
