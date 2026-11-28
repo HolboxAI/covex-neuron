@@ -71,9 +71,12 @@ def main(a):
                 cases[f"p{i}-wrong"] = (p, ref[(i + 1) % len(prompts)], i)
                 cases[f"p{i}-absent"] = (p, None, i)
             a0 = accepted(c, k9_port)
+            per_case = {}
             for name, (p, pred, i) in cases.items():                       # serial: one case per step
+                before = accepted(c, k9_port)
                 got = gen(c, k9_port, p, tokens, pred)
-                rows.append({"case": name, "exact": got == ref[i]})
+                per_case[name] = accepted(c, k9_port) - before
+                rows.append({"case": name, "exact": got == ref[i], "accepted_draft_tokens": per_case[name]})
                 if got != ref[i]:
                     first = next((k for k, (x, y) in enumerate(zip(got, ref[i])) if x != y), min(len(got), len(ref[i])))
                     problems.append(f"{name}: differs from plain greedy at token {first}")
@@ -87,7 +90,16 @@ def main(a):
                         problems.append(f"{name}-concurrent: differs from plain greedy")
             if a1 - a0 <= 0:
                 problems.append("no accepted draft tokens: speculation did not run")
-            result = {"pass": not problems, "accepted_draft_tokens_serial": a1 - a0, "cases": rows, "problems": problems,
+            # the aggregate counter also rises from prompt lookup, so prove the CLIENT prediction drove acceptance:
+            # each perfect-prediction case must accept at least half its tokens as drafts, and more than the same
+            # prompt without a prediction
+            for i in range(len(prompts)):
+                pf, ab = per_case[f"p{i}-perfect"], per_case[f"p{i}-absent"]
+                if pf < 0.5 * tokens or pf <= ab:
+                    problems.append(f"p{i}: perfect prediction accepted {pf:g} draft tokens (absent {ab:g}); "
+                                    f"client-supplied drafts were not used")
+            result = {"pass": not problems, "accepted_draft_tokens_serial": a1 - a0, "accepted_by_case": per_case,
+                      "cases": rows, "problems": problems,
                       "tokens": tokens, "n_prompts": len(prompts)}
     except Exception as e:  # noqa: BLE001 - any failure is a failed check, reported
         result = {"pass": False, "problems": [f"{type(e).__name__}: {e}"]}

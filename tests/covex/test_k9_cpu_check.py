@@ -9,6 +9,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 
 
+LOOKUP = True
+
+
 def _server(k9=False, diverge=False, accept=True):
     st = {"acc": 0}
     class H(BaseHTTPRequestHandler):
@@ -24,7 +27,9 @@ def _server(k9=False, diverge=False, accept=True):
             ids = [(len(b["prompt"]) * 7 + i) % 500 for i in range(b["max_tokens"])]
             pred = (b.get("vllm_xargs") or {}).get("covex_prediction_ids")
             if k9 and pred and accept:
-                st["acc"] += 4
+                st["acc"] += (b["max_tokens"] - 1) if pred == ids else 1      # a perfect prediction drafts almost all
+            if k9 and not pred and LOOKUP:
+                st["acc"] += 2                                                  # prompt lookup alone also counts
             if k9 and diverge and pred and pred != ids:
                 ids[5] += 1                                   # a wrong prediction corrupts the output: the bug to catch
             self._send({"choices": [{"token_ids": ids}]})
@@ -55,7 +60,8 @@ def test_prediction_dependent_output_fails(tmp_path):
 
 def test_no_speculation_fails(tmp_path):
     rc, d = _check(tmp_path, accept=False)
-    assert rc == 1 and "speculation did not run" in " ".join(d["problems"])
+    msg = " ".join(d["problems"])
+    assert rc == 1 and ("speculation did not run" in msg or "client-supplied drafts were not used" in msg), d
 
 
 
@@ -73,5 +79,34 @@ def test_two_phase_refs_file_matches_single_phase(tmp_path):
         r3 = subprocess.run([sys.executable, str(ROOT / "benchmarks/k9/cpu_check.py"), "0", str(k9.server_port), str(tmp_path / "x.json"),
                              "--n", "2", "--tokens", "12", "--refs", str(refs)], capture_output=True, text=True, timeout=60)
         assert r3.returncode == 1 and "different prompts" in json.load(open(tmp_path / "x.json"))["problems"][0]
+    finally:
+        ref.shutdown(); k9.shutdown()
+
+
+
+def test_acceptance_must_come_from_the_client_prediction(tmp_path):
+    """Astra: the aggregate counter also rises from prompt lookup; a server that ignores the prediction but accepts
+    lookup drafts must fail."""
+    ref = _server()
+    class Ignore(BaseHTTPRequestHandler):
+        st = {"acc": 0}
+        def log_message(self, *a): pass
+        def _send(self, b, ctype="application/json"):
+            b = b.encode() if isinstance(b, str) else json.dumps(b).encode()
+            self.send_response(200); self.send_header("Content-Type", ctype); self.send_header("Content-Length", str(len(b)))
+            self.end_headers(); self.wfile.write(b)
+        def do_GET(self):
+            self._send(f"vllm:spec_decode_num_accepted_tokens_total {Ignore.st['acc']}\n", "text/plain")
+        def do_POST(self):
+            b = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            Ignore.st["acc"] += 2                                                # lookup-only acceptance, prediction ignored
+            self._send({"choices": [{"token_ids": [(len(b["prompt"]) * 7 + i) % 500 for i in range(b["max_tokens"])]}]})
+    k9 = ThreadingHTTPServer(("127.0.0.1", 0), Ignore); threading.Thread(target=k9.serve_forever, daemon=True).start()
+    try:
+        out = tmp_path / "k.json"
+        r = subprocess.run([sys.executable, str(ROOT / "benchmarks/k9/cpu_check.py"), str(ref.server_port), str(k9.server_port),
+                            str(out), "--n", "3", "--tokens", "12"], capture_output=True, text=True, timeout=120)
+        d = json.load(open(out))
+        assert r.returncode == 1 and any("client-supplied drafts were not used" in p for p in d["problems"]), d
     finally:
         ref.shutdown(); k9.shutdown()

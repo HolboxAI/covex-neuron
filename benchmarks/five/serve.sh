@@ -54,7 +54,9 @@ case "$ARM" in
       k9-P)  CORES=${K9_CORES:-16-23}
              SPEC=(--speculative-config '{"method":"ngram","num_speculative_tokens":4,"prompt_lookup_min":3,"prompt_lookup_max":8}' --no-async-scheduling) ;;
     esac
-    export VLLM_NEURON_RESERVED_HEADROOM_GIB=${K9_HEADROOM_GIB:-7}
+    # K9_HEADROOM_GIB=none: no explicit headroom (CPU-mode check: the worker then uses fair share x util x cap)
+    if [ "${K9_HEADROOM_GIB:-7}" = none ]; then unset VLLM_NEURON_RESERVED_HEADROOM_GIB
+    else export VLLM_NEURON_RESERVED_HEADROOM_GIB=${K9_HEADROOM_GIB:-7}; fi
     ARGS=("$M/Qwen3-32B" --served-model-name m --dtype bfloat16 --tensor-parallel-size 8 --max-model-len 10240
           --max-num-batched-tokens 8192 --max-num-seqs 4 --no-enable-prefix-caching ${SPEC[@]+"${SPEC[@]}"}
           ); CFG='{"neuron_config":{"num_batched_tokens_buckets":[1024,8192],"num_seqs_buckets":[1,2,4],"on_device_sampling_config":{"all_greedy":true}}}' ;;
