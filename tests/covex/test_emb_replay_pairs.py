@@ -14,18 +14,25 @@ class _O:
 class LLM:
     def __init__(s, **kw): pass
     def embed(s, prompts, use_tqdm=False):
-        N[0] += 1; ids = [f"r{N[0]}-{i}" for i in range(len(prompts))]; start = 0; mem = []
+        ids = []
+        for _ in prompts:
+            N[0] += 1; ids.append(str(N[0]))
+        start = 0; mem = []
         for i, p in zip(ids, prompts):
             n = len(p.split()); mem.append({"req": i, "start": start, "tokens": n, "padded": n}); start += n
+        if MODE == "reorder":
+            mem = mem[::-1]                                       # trace lists members in another order than submitted
         split = MODE == "split" and len(prompts) == 2
         with open(LOG, "a") as f:
             groups = [[m] for m in mem] if split else [mem]
             for g in groups:
+                tp = sum(m["padded"] for m in g) + (8 if MODE == "bucket_drift" and N[0] % 3 == 0 else 0)
                 for rank in (0, 1):
-                    f.write(f"(Worker_TP{rank}) INFO COVEX_PACK_TRACE prefill step: members={g!r} total_padded=1 padded_num_reqs=8 packed=True\n")
+                    f.write(f"(Worker_TP{rank}) INFO COVEX_PACK_TRACE prefill step: members={g!r} total_padded={tp} padded_num_reqs=8 packed=True\n")
         out = []
         for k, p in enumerate(prompts):
             v = [float(b) for b in hashlib.sha256(p.encode()).digest()[:4]]
+            if MODE == "unstable" and N[0] % 2: v[1] += 1e-6
             if len(prompts) > 1 and not split:
                 if MODE == "offset" and k > 0: v[0] += 1e-3                       # depends on position only
                 if MODE == "peer" and k > 0: v[0] += hashlib.sha256(prompts[0].encode()).digest()[0] * 1e-4 + 1e-4
@@ -74,4 +81,20 @@ def test_peer_dependent_shift_is_classified(tmp_path):
 
 def test_split_pairs_fail_verification(tmp_path):
     rc, d = _run(tmp_path, "split")
-    assert rc == 1 and d["packing_verified"] is False
+    assert rc == 1 and d["packing_verified"] is False and d["verdict"] == "inconclusive"
+
+
+def test_unstable_repeats_are_inconclusive(tmp_path):
+    rc, d = _run(tmp_path, "unstable")
+    assert rc == 1 and d["verdict"] == "inconclusive" and not d["repeat_stable"], d
+
+
+def test_bucket_drift_between_repeats_is_inconclusive(tmp_path):
+    rc, d = _run(tmp_path, "bucket_drift")
+    assert rc == 1 and d["verdict"] == "inconclusive" and any("bucket" in w for w in d["inconclusive_because"]), d
+
+
+def test_b_is_bound_by_request_id_not_trace_order(tmp_path):
+    rc, d = _run(tmp_path, "reorder")
+    lay = d["layouts"]
+    assert rc == 0 and lay["A+B"][0][0] == 5 and lay["B+A"][0][0] == 0, lay        # B second at offset len(A)=5

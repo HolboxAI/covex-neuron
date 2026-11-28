@@ -18,7 +18,10 @@ Verdict (written to the JSON, not decided by the caller):
   follows_peer_content  A+B != A'+B (same offset)     -> cross-request masking / leakage first
   follows_offset        A+B == A'+B but != B alone    -> position ids, bounds, tiling at that offset
   invariant             all B vectors equal B alone   -> packing is exact for B
-Exit 0 when every case ran as intended (verified packing); the verdict is reported either way.
+  inconclusive          a case did not run as exactly one step of its own requests, B's offset/padding/bucket was not
+                        identical across repeats or between the two cases of a peer comparison, or an identical
+                        repeat changed B (exit 1)
+B is bound to its own request id (submission order) in the trace, never just by member count.
 """
 import argparse
 import json
@@ -46,8 +49,30 @@ def trace_steps(text):
         members = ast.literal_eval(m.group(1))
         key = tuple(sorted(x["req"] for x in members))
         if key not in seen:          # every TP rank logs the same step
-            seen.add(key); out.append(members)
+            seen.add(key); out.append({"members": members, "total_padded": int(m.group(2))})
     return out
+
+
+def _num(req):
+    """Offline request ids are consecutive counters (possibly with a suffix); order of submission = numeric order."""
+    m = re.search(r"\d+", str(req))
+    return int(m.group()) if m else -1
+
+
+def layout(steps, order):
+    """B's physical placement for one case: the single step that holds exactly this case's requests, B bound to its own
+    request id (the id submitted at B's position). None when the case did not run as one step."""
+    if len(order) == 1:
+        if len(steps) != 1 or len(steps[0]["members"]) != 1:
+            return None
+        m = steps[0]["members"][0]
+        return {"b_req": m["req"], "b_offset": m["start"], "b_padded": m["padded"], "bucket": steps[0]["total_padded"]}
+    if len(steps) != 1 or len(steps[0]["members"]) != len(order):
+        return None
+    by_id = sorted(steps[0]["members"], key=lambda m: _num(m["req"]))
+    b = by_id[order.index("B")]
+    return {"b_req": b["req"], "b_offset": b["start"], "b_padded": b["padded"], "bucket": steps[0]["total_padded"],
+            "members": [(m["req"], m["start"], m["tokens"], m["padded"]) for m in steps[0]["members"]]}
 
 
 def pick(texts, tok):
@@ -84,34 +109,51 @@ def main(argv=None):
     llm = LLM(model=a.model, runner="pooling", dtype="bfloat16", tensor_parallel_size=8, max_model_len=4096,
               max_num_batched_tokens=4096, max_num_seqs=32, enable_prefix_caching=False, additional_config=cfg)
     log = Path(a.log) if a.log else None
+    if log is None:
+        raise SystemExit("--log is required: packing must be verified from the server trace")
     vectors, runs = {}, []
     for rep in range(a.repeat):
         for name, order in CASES.items():
-            start = log.stat().st_size if log and log.exists() else 0
+            start = log.stat().st_size if log.exists() else 0
             outs = llm.embed([prompts[k] for k in order], use_tqdm=False)
-            b = list(outs[order.index("B")].outputs.embedding)
-            vectors.setdefault(name, []).append(b)
-            steps = trace_steps(log.read_text(errors="replace")[start:]) if log else []
-            shared = [s for s in steps if len(s) == len(order)]
-            runs.append({"case": name, "repeat": rep, "order": order, "steps": steps,
-                         "packed_as_intended": len(order) == 1 or (len(shared) == 1 and len(steps) == 1),
-                         "b_offset": next((s[order.index("B")]["start"] for s in shared), None)})
+            vectors.setdefault(name, []).append(list(outs[order.index("B")].outputs.embedding))
+            lay = layout(trace_steps(log.read_text(errors="replace")[start:]), order)
+            runs.append({"case": name, "repeat": rep, "order": order, "layout": lay})
+    why = []
+    lay = {}
+    for r in runs:
+        if r["layout"] is None:
+            why.append(f"{r['case']} repeat {r['repeat']}: did not run as one step with exactly its requests")
+        else:
+            key = (r["layout"]["b_offset"], r["layout"]["b_padded"], r["layout"]["bucket"])
+            lay.setdefault(r["case"], set()).add(key)
+    for case, keys in lay.items():
+        if len(keys) != 1:
+            why.append(f"{case}: B's offset/padding/bucket changed across repeats {sorted(keys)}")
+    for x, y in (("A+B", "A'+B"), ("B+A", "B+A'")):
+        if lay.get(x) and lay.get(y) and lay[x] != lay[y]:
+            why.append(f"{x} vs {y}: B's layout differs {sorted(lay[x])} vs {sorted(lay[y])} (peer comparison not controlled)")
+    repeat_stable = all(vec_cmp(vs[0], v)["exact"] for vs in vectors.values() for v in vs[1:])
+    if not repeat_stable:
+        why.append("identical case repeated gave a different B vector")
     ref = vectors["B"][0]
     cmp = {name: [vec_cmp(ref, v) for v in vs] for name, vs in vectors.items()}
-    repeat_stable = all(vec_cmp(vs[0], v)["exact"] for vs in vectors.values() for v in vs[1:])
     same_off = vec_cmp(vectors["A+B"][0], vectors["A'+B"][0])["exact"]
     first_same = vec_cmp(vectors["B+A"][0], vectors["B+A'"][0])["exact"]
     all_eq = all(c["exact"] for cs in cmp.values() for c in cs)
-    verdict = ("invariant" if all_eq else "follows_peer_content" if not (same_off and first_same)
-               else "follows_offset")
-    verified = all(r["packed_as_intended"] for r in runs) if log else False
+    if why:
+        verdict = "inconclusive"
+    else:
+        verdict = ("invariant" if all_eq else "follows_peer_content" if not (same_off and first_same) else "follows_offset")
+    verified = not why
     res = {"verdict": verdict, "packing_verified": verified, "repeat_stable": repeat_stable, "token_length": n_tok,
+           "inconclusive_because": why, "layouts": {k: sorted(v) for k, v in lay.items()},
            "peer_changed_same_offset_exact": same_off, "peer_changed_B_first_exact": first_same,
            "vs_B_alone": {k: v[0] for k, v in cmp.items()}, "runs": runs}
     Path(a.out).write_text(json.dumps(res, indent=1))
     print(json.dumps({k: res[k] for k in ("verdict", "packing_verified", "repeat_stable", "peer_changed_same_offset_exact",
                                            "peer_changed_B_first_exact")}))
-    return 0 if verified else 1
+    return 0 if verdict != "inconclusive" else 1
 
 
 if __name__ == "__main__":
