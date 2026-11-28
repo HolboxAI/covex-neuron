@@ -166,6 +166,12 @@ def measure(model, arm, port, cwd, env, model_path, data, windows, cpus, limit):
                 label = f"{arm}-c{c}-w{w}"
                 call(["bash", BENCH / "asr/bench.sh", label, port, 100, c])
                 (cwd / "results" / f"{label}.json").rename(cwd / dest)
+                if model.replicas > 1:   # per-replica requests, audio bytes and busy seconds (cumulative; diff windows)
+                    try:
+                        with urllib.request.urlopen(f"http://127.0.0.1:{port}/proxy_stats", timeout=10) as r:
+                            (cwd / f"proxy-stats-c{c}-w{w}.json").write_bytes(r.read())
+                    except (OSError, urllib.error.URLError) as exc:
+                        (cwd / f"proxy-stats-c{c}-w{w}.json").write_text(json.dumps({"error": str(exc)}))
 
 
 def check_embedding_isolation(jobs, data, timeout):
