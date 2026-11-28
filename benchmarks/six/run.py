@@ -67,11 +67,14 @@ WAVES = (
      Model("gpt-oss-20b", "oss-U", "oss-P", "gen", 8, (1, 4), "output tok/s", input_lengths=(1024, 1536))),
 )
 
-# The follow-up repeats ASR and VL with a matched upstream control for each configuration.
-ASR_TP8, ASR_REPLICAS, VL, _ = WAVES[1]
-TUNED_WAVES = (WAVES[0], (replace(ASR_TP8, tuned="asr-Ut"),
-                           replace(ASR_REPLICAS, tuned="asr-U2t"),
-                           replace(VL, tuned="vl-Ub", fork="vl-Cb")))
+# Schedule a primary comparison for each model in the first two waves. The
+# alternate ASR layout uses the same two chips per arm in a third wave.
+ASR_TP8, ASR_REPLICAS, VL, GPT = WAVES[1]
+TUNED_WAVES = (
+    WAVES[0],
+    (replace(ASR_TP8, tuned="asr-Ut"), replace(VL, tuned="vl-Ub", fork="vl-Cb"), GPT),
+    (replace(ASR_REPLICAS, tuned="asr-U2t"),),
+)
 
 GPT_PADDED = Model("gpt-oss-20b", "oss-U8k", "oss-P8k", "gen", 8, (1, 4), "output tok/s")
 
@@ -702,7 +705,7 @@ def main():
     parser.add_argument("--downloads", type=Path, help="download verdicts from this attempt (defaults to downloads.json beside the output directory if present)")
     parser.add_argument("--embedding-run", type=Path, help="local copy of a reviewed embedding attempt; reuse P4 and P8 vs upstream")
     layout = parser.add_mutually_exclusive_group()
-    layout.add_argument("--tuned-followup", action="store_true", help="repeat the campaign with matched ASR and VL controls, omitting GPT-OSS")
+    layout.add_argument("--tuned-followup", action="store_true", help="run all six models with matched ASR and VL controls and an additional ASR replica comparison")
     layout.add_argument("--gpt-padded-diagnostic-only", action="store_true",
                         help="run only the GPT-OSS pair with forced 8192-token prefills; excluded from the six-model result")
     parser.add_argument("--windows", type=int, default=3)

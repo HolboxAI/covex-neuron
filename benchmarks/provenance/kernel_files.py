@@ -12,6 +12,7 @@ QWEN_4K = {
     "core.attention.attention_tkg_utils": "428c26cb405d6fa3f56a57096036bbb04cb183610deb36ae2c5cf0d363ccb55c",
 }
 LLAMA_PAIR = {
+    "core.attention.attention_tkg": "ad0485d7dea09e3da3055ccf49a63b18015cf87a0743daf7265744da192ea6c9",
     "experimental.transformer.transformer_tkg": "d56cde14c96e8b34f0698ba36452057003f65ce32716b86c3760815fadfde051",
     "experimental.transformer.attention_block_tkg": "79611627134739a6df6ead1992f910739cf9ad4b1fe1c802d04e2d84e2114803",
     "core.mlp.mlp_tkg.mlp_tkg": "384a0478a799237ab7433740707e91bcefc8f81295cc76e4603ef82b74a77b78",
