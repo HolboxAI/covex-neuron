@@ -56,7 +56,7 @@ class Model:
         return (self.stock, self.tuned, self.fork) if self.tuned else (self.stock, self.fork)
 
 
-ASR_LABELS = {"asr-U": "S2", "asr-B8": "B8", "asr-U2": "R4", "asr-R": "RB"}
+ASR_LABELS = {"asr-U": "S2", "asr-Ut": "S8", "asr-B8": "B8", "asr-U2": "R4", "asr-U2t": "R8", "asr-R": "RB"}
 WAVES = (
     (Model("Qwen3-32B", "q32-U", "q32-F4", "gen", 8, (1, 8), "output tok/s", tuned="q32-Ut"),
      Model("Qwen3-Embedding-8B", "emb-U", "emb-P8t", "emb", 8, (32,), "sequences/s"),

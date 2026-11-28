@@ -139,3 +139,16 @@ def test_asr_arms_never_request_multiple_audio_prefills_per_step():
                              capture_output=True, text=True, check=True).stdout
         cfg = json.loads(out)
         assert cfg["neuron_config"].get("max_prefills_per_batch", 1) == 1, (a, cfg)
+
+
+def test_asr_tuned_stock_uses_exactly_the_covex_buckets():
+    """Tuned upstream gets the same eight prefill buckets as the COVEX ASR arms, so a gain over it is code, not config."""
+    import subprocess
+    root = Path(__file__).resolve().parents[2]
+    get = lambda a: json.loads(subprocess.run(["bash", "-c", f"source {root}/benchmarks/asr/arm_config.sh && arm_config {a}"],
+                                              capture_output=True, text=True, check=True).stdout)["neuron_config"]
+    eight = [128, 256, 384, 512, 640, 768, 896, 1024]
+    for tuned, fork in (("S8", "B8"), ("R8", "RB")):
+        t, f = get(tuned), get(fork)
+        assert t["num_batched_tokens_buckets"] == f["num_batched_tokens_buckets"] == eight
+        assert t == f and "num_batched_tokens_bucket_step" not in f      # identical neuron_config: only the code differs

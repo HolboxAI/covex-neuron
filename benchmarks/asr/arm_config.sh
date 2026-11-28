@@ -28,9 +28,13 @@ arm_config() {
     # campaign 3fd284f: two audio prefills per step fail every c8 request ("_gather_mm_embeddings expects
     # single-request prefill ... max_encoder_blocks_per_request=4 assumes one request per step"), so the fork ASR arms
     # keep ONE audio prefill per step (client still 8 in flight) and change only the 128-token prefill buckets (#5).
-    B8)  buckets='"num_batched_tokens_bucket_step": 128,' ;;                                       # TP8: #5 only
-    R4)  ARM_TP=4; enc_dp=4 ;;                                                                     # stock config, TP4
-    RB)  ARM_TP=4; enc_dp=4; buckets='"num_batched_tokens_bucket_step": 128,' ;;                 # TP4 replica: #5 only
+    B8)  buckets='"num_batched_tokens_buckets": [128, 256, 384, 512, 640, 768, 896, 1024],' ;;                                       # TP8: #5 only
+    R4)  ARM_TP=4; enc_dp=4 ;;
+    # tuned stock = upstream with the SAME eight prefill buckets as the COVEX arms (upstream e16d424 accepts the list;
+    # the fork's bucket_step 128 expands to exactly this), so any ASR gain over S8/R8 is code, not configuration
+    S8)  buckets='"num_batched_tokens_buckets": [128, 256, 384, 512, 640, 768, 896, 1024],' ;;
+    R8)  ARM_TP=4; enc_dp=4; buckets='"num_batched_tokens_buckets": [128, 256, 384, 512, 640, 768, 896, 1024],' ;;                                                                     # stock config, TP4
+    RB)  ARM_TP=4; enc_dp=4; buckets='"num_batched_tokens_buckets": [128, 256, 384, 512, 640, 768, 896, 1024],' ;;                 # TP4 replica: #5 only
     *) echo "unknown arm $arm" >&2; return 2 ;;
   esac
   cat <<JSON
