@@ -1,0 +1,5 @@
+httpx
+numpy
+pyflakes
+pytest
+pytest-timeout
