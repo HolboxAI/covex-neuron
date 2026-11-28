@@ -96,6 +96,8 @@ def service(argv, cwd, env, stream):
             os.killpg(process.pid, signal.SIGTERM)
             try:
                 process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                pass   # campaign 3fd284f: a slow stop raised here and lost every wave-2 row; SIGKILL below ends it
             finally:
                 try:
                     os.killpg(process.pid, signal.SIGKILL)

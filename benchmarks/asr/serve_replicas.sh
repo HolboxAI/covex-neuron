@@ -10,10 +10,14 @@ P0=$((PORT + 1000)); P1=$((PORT + 2000)); mkdir -p logs
 if [ -n "${SUITE_CPUS:-}" ]; then a=${SUITE_CPUS%-*}; b=${SUITE_CPUS#*-}; m=$(( (a + b + 1) / 2 ))
   C0="$a-$((m - 1))"; C1="$m-$b"; else C0=""; C1=""; fi
 pids=()
-cleanup() { for p in "${pids[@]}"; do kill -TERM "$p" 2>/dev/null; done; sleep 3; for p in "${pids[@]}"; do kill -KILL "$p" 2>/dev/null; done; }
+cleanup() {   # finishes well inside the runner's 5 s stop window
+  for p in "${pids[@]}"; do kill -TERM "$p" 2>/dev/null; done
+  for _ in 1 2 3 4 5 6; do alive=0; for p in "${pids[@]}"; do kill -0 "$p" 2>/dev/null && alive=1; done; [ $alive = 0 ] && return; sleep 0.25; done
+  for p in "${pids[@]}"; do kill -KILL "$p" 2>/dev/null; done
+}
 trap cleanup EXIT TERM INT
 REPLICA=0 REPLICA_CPUS=$C0 LOG_TAG=.r0 bash "$H/serve.sh" "$ARM" "$PAIR" "$P0" & pids+=($!)
 REPLICA=1 REPLICA_CPUS=$C1 LOG_TAG=.r1 bash "$H/serve.sh" "$ARM" "$PAIR" "$P1" & pids+=($!)
 ${SUITE_PYTHON:-python3} "$H/rr_proxy.py" "$PORT" "$P0" "$P1" > "logs/$ARM.proxy.log" 2>&1 & pids+=($!)
 # the arm is alive while every child is: a replica that dies takes the arm down (no silent single-replica result)
-while :; do for p in "${pids[@]}"; do kill -0 "$p" 2>/dev/null || { echo "replica process $p exited" >&2; exit 1; }; done; sleep 2; done
+while :; do for p in "${pids[@]}"; do kill -0 "$p" 2>/dev/null || { echo "replica process $p exited" >&2; exit 1; }; done; sleep 0.5; done

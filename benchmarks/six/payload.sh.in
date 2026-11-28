@@ -63,6 +63,8 @@ tar xzf sixdata.tgz -C "$stage/data"
 tar xzf asr_client.tgz -C "$CLIENT_DIR"
 tar xzf asr_data.tgz -C "$CLIENT_DIR"
 "$FORK_PY" -m pip install -q httpx soundfile jiwer
+# the upstream arms decode the same audio: without soundfile stock ASR rejected every clip (HTTP 400, campaign 3fd284f)
+"$UPSTREAM_PY" -m pip install -q httpx soundfile
 "$FORK_PY" -m pip freeze > "$CAMPAIGN_OUT/fork-packages.txt"
 "$UPSTREAM_PY" -m pip freeze > "$CAMPAIGN_OUT/upstream-packages.txt"
 cp fork/benchmarks/six/model_pins.json "$CAMPAIGN_OUT/"
